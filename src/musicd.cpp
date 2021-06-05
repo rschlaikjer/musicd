@@ -11,9 +11,11 @@
 
 #include <openssl/sha.h>
 
-#include <fileref.h>
-#include <tag.h>
-#include <tpropertymap.h>
+#include <pqxx/binarystring>
+#include <pqxx/pqxx>
+
+#include <taglib/fileref.h>
+#include <taglib/tag.h>
 
 #define LOG_I(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
 #define LOG_E(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
@@ -35,6 +37,57 @@ static const std::vector<std::string> IGNORE_FILETYPES = {
     ".log", ".cue", ".nfo", ".txt", ".pdf", ".sfv", ".swf",
 };
 
+static const char *INSERT_TRACK = "pq_INSERT_TRACK";
+static const char *INSERT_IMAGE = "pq_INSERT_IMAGE";
+
+void pq_prepare(pqxx::connection &conn) {
+  conn.prepare(INSERT_TRACK, "INSERT INTO track ("
+                             "raw_path, "
+                             "parent_path, "
+                             "checksum, "
+                             "tag_title, "
+                             "tag_artist, "
+                             "tag_album, "
+                             "tag_year, "
+                             "tag_comment, "
+                             "tag_track, "
+                             "tag_genre "
+                             ") VALUES ( "
+                             "$1, "
+                             "$2, "
+                             "$3, "
+                             "$4, "
+                             "$5, "
+                             "$6, "
+                             "$7, "
+                             "$8, "
+                             "$9, "
+                             "$10 "
+                             ") ON CONFLICT (checksum) DO UPDATE SET "
+                             "raw_path = EXCLUDED.raw_path, "
+                             "parent_path = EXCLUDED.parent_path, "
+                             "tag_title = EXCLUDED.tag_title, "
+                             "tag_artist = EXCLUDED.tag_artist, "
+                             "tag_album = EXCLUDED.tag_album, "
+                             "tag_year = EXCLUDED.tag_year, "
+                             "tag_comment = EXCLUDED.tag_comment, "
+                             "tag_track = EXCLUDED.tag_track, "
+                             "tag_genre = EXCLUDED.tag_genre"
+
+  );
+  conn.prepare(INSERT_IMAGE, "INSERT INTO image ("
+                             "raw_path, "
+                             "parent_path, "
+                             "checksum "
+                             ") VALUES ( "
+                             "$1, "
+                             "$2, "
+                             "$3 "
+                             ") ON CONFLICT (checksum) DO UPDATE SET "
+                             "raw_path = EXCLUDED.raw_path, "
+                             "parent_path = EXCLUDED.parent_path ");
+}
+
 const std::string bytes_to_hex(const std::string &bytes) {
   std::string ret;
   ret.resize(bytes.size() * 2);
@@ -54,10 +107,16 @@ const std::string bytes_to_hex(const std::string &bytes) {
   return ret;
 }
 
-struct MusicFile {
+struct TrackedFile {
   std::string path;
   std::string checksum;
 
+  std::string parent_path() {
+    return std::filesystem::path(path).parent_path();
+  }
+};
+
+struct MusicFile : TrackedFile {
   // Tag fields
   struct {
     std::string title;
@@ -86,10 +145,7 @@ struct MusicFile {
   }
 };
 
-struct ImageFile {
-  std::string path;
-  std::string checksum;
-};
+struct ImageFile : TrackedFile {};
 
 std::string sha1sum(const std::string &path) {
   // Open file
@@ -199,7 +255,7 @@ std::unique_ptr<ImageFile> parse_image_file(const std::string &path) {
   return ret;
 }
 
-void ingest_music_file(const std::string &path) {
+void ingest_music_file(pqxx::work &pq_transaction, const std::string &path) {
   // Try and load our required metadata
   auto music_file = parse_music_file(path);
   if (!music_file) {
@@ -209,10 +265,16 @@ void ingest_music_file(const std::string &path) {
   music_file->print();
 
   // Save to the db
-  // TODO
+  pq_transaction
+      .prepared(INSERT_TRACK)(music_file->path)(music_file->parent_path())(
+          pqxx::binarystring(music_file->checksum))(music_file->tags.title)(
+          music_file->tags.artist)(music_file->tags.album)(
+          music_file->tags.year)(music_file->tags.comment)(
+          music_file->tags.track)(music_file->tags.genre)
+      .exec();
 }
 
-void ingest_image_file(const std::string &path) {
+void ingest_image_file(pqxx::work &pq_transaction, const std::string &path) {
   // Try and load our required metadata
   auto image_file = parse_image_file(path);
   if (!image_file) {
@@ -220,17 +282,21 @@ void ingest_image_file(const std::string &path) {
   }
 
   // Save to the db
-  // TODO
+  pq_transaction
+      .prepared(INSERT_IMAGE)(image_file->path)(image_file->parent_path())(
+          pqxx::binarystring(image_file->checksum))
+      .exec();
 }
 
-void ingest_file(const std::filesystem::directory_entry &file) {
+void ingest_file(pqxx::work &pq_transaction,
+                 const std::filesystem::directory_entry &file) {
   // We need to determine what type of file this is - for now, rely on file
   // extension
   const std::string extension = filetype_extension(file.path());
   if (vector_contains(MUSIC_FILETYPES, extension)) {
-    ingest_music_file(file.path());
+    ingest_music_file(pq_transaction, file.path());
   } else if (vector_contains(IMAGE_FILETYPES, extension)) {
-    ingest_image_file(file.path());
+    ingest_image_file(pq_transaction, file.path());
   } else if (vector_contains(PLAYLIST_FILETYPES, extension)) {
     // Ignore
   } else if (vector_contains(IGNORE_FILETYPES, extension)) {
@@ -241,18 +307,47 @@ void ingest_file(const std::filesystem::directory_entry &file) {
   }
 }
 
-void walk_music_dir(const char *path) {
+void walk_music_dir(pqxx::connection &pq_conn, const char *path) {
+  // Create a new transaction
+  pqxx::work pq_transaction(pq_conn);
+
   // Iterate all files / directories in the search path
   for (const auto &dirent :
        std::filesystem::recursive_directory_iterator(path)) {
     // If we encounter a regular file, attempt to handle
     if (dirent.is_regular_file()) {
-      ingest_file(dirent);
+      ingest_file(pq_transaction, dirent);
     }
   }
+
+  // Commit our DB update
+  pq_transaction.commit();
+}
+
+void pgusage() {
+  fprintf(stderr,
+          "PSQL variables not set! Please ensure the following are defined:\n"
+          "PGHOST (db host)\n"
+          "PGDATABASE (database)\n"
+          "PGUSER (username)\n"
+          "PGPASSWORD (password)\n");
+  exit(1);
 }
 
 int main(int argc, char *argv[]) {
-  walk_music_dir(argv[1]);
+  // Init postgres
+  if (!getenv("PGHOST") || !getenv("PGDATABASE") || !getenv("PGUSER") ||
+      !getenv("PGPASSWORD")) {
+    pgusage();
+  }
+  pqxx::connection pq_conn;
+  pq_prepare(pq_conn);
+
+  // Check args
+  if (argc != 2) {
+    fprintf(stderr, "Usage: %s [Music Dir]\n", argv[0]);
+  }
+
+  walk_music_dir(pq_conn, argv[1]);
   return 0;
 }
