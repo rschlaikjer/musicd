@@ -163,8 +163,10 @@ struct TrackedFile {
   std::string path;
   std::string checksum;
 
-  std::string parent_path() {
-    return std::filesystem::path(path).parent_path();
+  std::string parent_path(const std::string base_path) {
+    const std::filesystem::path parent_path =
+        std::filesystem::path(path).parent_path();
+    return parent_path.lexically_relative(base_path);
   }
 };
 
@@ -307,7 +309,8 @@ std::unique_ptr<ImageFile> parse_image_file(const std::string &path) {
   return ret;
 }
 
-void ingest_music_file(pqxx::work &pq_transaction, const std::string &path) {
+void ingest_music_file(pqxx::work &pq_transaction, const std::string &base_path,
+                       const std::string &path) {
   // Try and load our required metadata
   auto music_file = parse_music_file(path);
   if (!music_file) {
@@ -318,7 +321,8 @@ void ingest_music_file(pqxx::work &pq_transaction, const std::string &path) {
 
   // Save to the db
   pq_transaction
-      .prepared(INSERT_TRACK)(music_file->path)(music_file->parent_path())(
+      .prepared(INSERT_TRACK)(music_file->path)(
+          music_file->parent_path(base_path))(
           pqxx::binarystring(music_file->checksum))(music_file->tags.title)(
           music_file->tags.artist)(music_file->tags.album)(
           music_file->tags.year)(music_file->tags.comment)(
@@ -326,7 +330,8 @@ void ingest_music_file(pqxx::work &pq_transaction, const std::string &path) {
       .exec();
 }
 
-void ingest_image_file(pqxx::work &pq_transaction, const std::string &path) {
+void ingest_image_file(pqxx::work &pq_transaction, const std::string &base_path,
+                       const std::string &path) {
   // Try and load our required metadata
   auto image_file = parse_image_file(path);
   if (!image_file) {
@@ -335,20 +340,21 @@ void ingest_image_file(pqxx::work &pq_transaction, const std::string &path) {
 
   // Save to the db
   pq_transaction
-      .prepared(INSERT_IMAGE)(image_file->path)(image_file->parent_path())(
-          pqxx::binarystring(image_file->checksum))
+      .prepared(INSERT_IMAGE)(image_file->path)(image_file->parent_path(
+          base_path))(pqxx::binarystring(image_file->checksum))
       .exec();
 }
 
 void ingest_file(pqxx::work &pq_transaction,
+                 const std::filesystem::path &base_path,
                  const std::filesystem::directory_entry &file) {
   // We need to determine what type of file this is - for now, rely on file
   // extension
   const std::string extension = filetype_extension(file.path());
   if (vector_contains(MUSIC_FILETYPES, extension)) {
-    ingest_music_file(pq_transaction, file.path());
+    ingest_music_file(pq_transaction, base_path, file.path());
   } else if (vector_contains(IMAGE_FILETYPES, extension)) {
-    ingest_image_file(pq_transaction, file.path());
+    ingest_image_file(pq_transaction, base_path, file.path());
   } else if (vector_contains(PLAYLIST_FILETYPES, extension)) {
     // Ignore
   } else if (vector_contains(IGNORE_FILETYPES, extension)) {
@@ -363,12 +369,15 @@ void walk_music_dir(pqxx::connection &pq_conn, const char *path) {
   // Create a new transaction
   pqxx::work pq_transaction(pq_conn);
 
+  // Canonicalize base path
+  std::filesystem::path base_path(path);
+
   // Iterate all files / directories in the search path
   for (const auto &dirent :
        std::filesystem::recursive_directory_iterator(path)) {
     // If we encounter a regular file, attempt to handle
     if (dirent.is_regular_file()) {
-      ingest_file(pq_transaction, dirent);
+      ingest_file(pq_transaction, base_path, dirent);
     }
   }
 
@@ -730,6 +739,9 @@ int main(int argc, char *argv[]) {
 
   // Init imagemagick
   Magick::InitializeMagick(*argv);
+
+  // Update music database
+  walk_music_dir(pq_conn, argv[1]);
 
   const char *bind_addr = "0.0.0.0";
   const char *bind_port = "5959";
