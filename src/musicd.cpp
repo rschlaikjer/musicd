@@ -55,6 +55,10 @@ static const std::vector<std::string> IGNORE_FILETYPES = {
 
 static const char *INSERT_TRACK = "pq_INSERT_TRACK";
 static const char *INSERT_IMAGE = "pq_INSERT_IMAGE";
+static const char *SELECT_TRACK_PATH_BY_CHECKSUM =
+    "pq_SELECT_TRACK_PATH_BY_CHECKSUM";
+static const char *SELECT_IMAGE_PATH_BY_CHECKSUM =
+    "pq_SELECT_IMAGE_PATH_BY_CHECKSUM";
 
 enum class PacketOpcode : uint32_t {
   // Trigger update of remote database
@@ -126,6 +130,12 @@ void pq_prepare(pqxx::connection &conn) {
                              ") ON CONFLICT (checksum) DO UPDATE SET "
                              "raw_path = EXCLUDED.raw_path, "
                              "parent_path = EXCLUDED.parent_path ");
+
+  conn.prepare(SELECT_TRACK_PATH_BY_CHECKSUM,
+               "SELECT raw_path FROM track WHERE checksum = $1");
+
+  conn.prepare(SELECT_IMAGE_PATH_BY_CHECKSUM,
+               "SELECT raw_path FROM image WHERE checksum = $1");
 }
 
 const std::string bytes_to_hex(const std::string &bytes) {
@@ -423,7 +433,7 @@ serialize_music_db(pqxx::connection &pq_conn) {
     auto *track = ret->add_tracks();
     track->set_raw_path(row[0].as<std::string>());
     track->set_parent_path(row[1].as<std::string>());
-    track->set_checksum(row[2].as<std::string>());
+    track->set_checksum(pqxx::binarystring(row[2]).str());
     track->set_tag_title(row[3].as<std::string>());
     track->set_tag_artist(row[4].as<std::string>());
     track->set_tag_album(row[5].as<std::string>());
@@ -434,9 +444,89 @@ serialize_music_db(pqxx::connection &pq_conn) {
   }
 
   // And all the image info
-  pqxx::result track_rows = txn.exec("SELECT * from image");
+  const char *image_select = "SELECT * from image";
+  for (auto const &row : txn.exec(image_select)) {
+    auto *image = ret->add_images();
+    image->set_raw_path(row[0].as<std::string>());
+    image->set_parent_path(row[1].as<std::string>());
+    image->set_checksum(pqxx::binarystring(row[2]).str());
+  }
 
   return ret;
+}
+
+std::unique_ptr<std::string> read_file(std::string path) {
+  // Try and open the file
+  int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    LOG_E("Failed to open %s: %d: %s\n", path.c_str(), errno, strerror(errno));
+    return nullptr;
+  }
+  std::shared_ptr<void> _defer_close_fd(nullptr, [=](...) { ::close(fd); });
+
+  // Get total file size
+  const ssize_t file_size = ::lseek(fd, 0, SEEK_END);
+  if (file_size < 0) {
+    LOG_E("Failed to seek %s: %d: %s\n", path.c_str(), errno, strerror(errno));
+    return nullptr;
+  }
+
+  // Move back to start of file
+  if (lseek(fd, 0, SEEK_SET) < 0) {
+    LOG_E("Failed to seek %s: %d: %s\n", path.c_str(), errno, strerror(errno));
+    return nullptr;
+  }
+
+  // Reserve a string to hold the file data
+  std::unique_ptr<std::string> ret = std::make_unique<std::string>();
+  ret->resize(file_size);
+
+  // Read the entire file
+  static const ssize_t read_size = 16 * 1024;
+  ssize_t total_read = 0;
+  while (total_read < file_size) {
+    ssize_t read_ok = ::read(fd, ret->data() + total_read,
+                             std::min(read_size, file_size - total_read));
+    if (read_ok < 0) {
+      LOG_E("Failed to read %s: %d: %s\n", path.c_str(), errno,
+            strerror(errno));
+      return nullptr;
+    }
+    total_read += read_ok;
+  }
+
+  return ret;
+}
+
+std::unique_ptr<std::string> fetch_object_by_checksum(pqxx::connection &pq_conn,
+                                                      const char *query,
+                                                      std::string checksum) {
+  // Look up the path for this checksum
+  pqxx::work txn(pq_conn);
+  pqxx::result rows = txn.exec_prepared(query, pqxx::binarystring(checksum));
+
+  // If it doesn't exist, return null
+  if (rows.size() == 0) {
+    return nullptr;
+  }
+
+  // Extract the path
+  const std::string path = rows[0][0].as<std::string>();
+
+  // Read the file and return
+  return read_file(path);
+}
+
+std::unique_ptr<std::string> fetch_track_by_checksum(pqxx::connection &pq_conn,
+                                                     std::string checksum) {
+  return fetch_object_by_checksum(pq_conn, SELECT_TRACK_PATH_BY_CHECKSUM,
+                                  checksum);
+}
+
+std::unique_ptr<std::string> fetch_image_by_checksum(pqxx::connection &pq_conn,
+                                                     std::string checksum) {
+  return fetch_object_by_checksum(pq_conn, SELECT_IMAGE_PATH_BY_CHECKSUM,
+                                  checksum);
 }
 
 template <typename T> void remove_in_vector(std::vector<T> &v, int idx) {
@@ -504,12 +594,46 @@ int handle_packet_fetch_db(int fd, uint32_t nonce) {
 
 int handle_packet_fetch_track(int fd, uint32_t nonce, std::string req) {
   LOG_I("Fetch track %s for fd %d\n", bytes_to_hex(req).c_str(), fd);
-  return 0;
+
+  // Try and fetch a track with this checksum
+  std::unique_ptr<std::string> track_data =
+      fetch_track_by_checksum(pq_conn, req);
+
+  // If not found, send zero-len response
+  if (track_data == nullptr) {
+    std::string empty_resp = "";
+    LOG_E("Failed to find track for checksum %s\n", bytes_to_hex(req).c_str());
+    return send_packet_response(fd, nonce, PacketOpcode::FETCH_TRACK,
+                                empty_resp);
+  }
+
+  // Otherwise, send full data back
+  LOG_I("Sending response for track %s size %lu\n", bytes_to_hex(req).c_str(),
+        track_data->size());
+  return send_packet_response(fd, nonce, PacketOpcode::FETCH_TRACK,
+                              *track_data);
 }
 
 int handle_packet_fetch_image(int fd, uint32_t nonce, std::string req) {
   LOG_I("Fetch image %s for fd %d\n", bytes_to_hex(req).c_str(), fd);
-  return 0;
+
+  // Try and fetch a image with this checksum
+  std::unique_ptr<std::string> image_data =
+      fetch_image_by_checksum(pq_conn, req);
+
+  // If not found, send zero-len response
+  if (image_data == nullptr) {
+    std::string empty_resp = "";
+    LOG_E("Failed to find track for checksum %s\n", bytes_to_hex(req).c_str());
+    return send_packet_response(fd, nonce, PacketOpcode::FETCH_IMAGE,
+                                empty_resp);
+  }
+
+  // Otherwise, send full data back
+  LOG_I("Sending response for image %s size %lu\n", bytes_to_hex(req).c_str(),
+        image_data->size());
+  return send_packet_response(fd, nonce, PacketOpcode::FETCH_IMAGE,
+                              *image_data);
 }
 
 int handle_packet(int fd, uint32_t nonce, PacketOpcode cmd, std::string &data) {
