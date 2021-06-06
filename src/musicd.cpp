@@ -5,6 +5,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/timerfd.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +30,8 @@
 
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
+
+#include <track.pb.h>
 
 #define LOG_I(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
 #define LOG_E(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
@@ -39,6 +55,30 @@ static const std::vector<std::string> IGNORE_FILETYPES = {
 
 static const char *INSERT_TRACK = "pq_INSERT_TRACK";
 static const char *INSERT_IMAGE = "pq_INSERT_IMAGE";
+
+enum class PacketOpcode : uint32_t {
+  // Trigger update of remote database
+  // No data arguments
+  // Zero-len response comes after update is complete
+  UPDATE_REMOTE_DB = 0,
+
+  // Fetch serialized database information
+  // No data arguments
+  // Response is protobuf-serialized db info
+  FETCH_DB = 1,
+
+  // Fetch track with specified checksum
+  // Data argument is checksum (20 bytes)
+  // Response is raw track data (variable size)
+  FETCH_TRACK = 2,
+
+  // Fetch image with specified checksum
+  // Data argument is checksum (20 bytes)
+  // Response is raw image data (variable size)
+  FETCH_IMAGE = 3,
+};
+
+pqxx::connection pq_conn;
 
 void pq_prepare(pqxx::connection &conn) {
   conn.prepare(INSERT_TRACK, "INSERT INTO track ("
@@ -334,13 +374,209 @@ void pgusage() {
   exit(1);
 }
 
+int set_socket_nonblocking(int fd) {
+  int32_t socketfd_flags = fcntl(fd, F_GETFL);
+  if (socketfd_flags == -1) {
+    LOG_E("fcntl: get flags: %s\n", strerror(errno));
+    return EXIT_FAILURE;
+  }
+
+  int err = fcntl(fd, F_SETFL, socketfd_flags | O_NONBLOCK);
+  if (err == -1) {
+    LOG_E("fcntl: set flags: %s\n", strerror(errno));
+    return EXIT_FAILURE;
+  }
+
+  return EXIT_SUCCESS;
+}
+
+int set_socket_keepalive(int fd, int interval, int tolerance) {
+  int ok = 0;
+  ok = setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, (void *)&interval,
+                  sizeof(interval));
+  ok = setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, (void *)&interval,
+                  sizeof(interval));
+  ok = setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&tolerance,
+                  sizeof(tolerance));
+  return ok;
+}
+
+std::unique_ptr<msgs::MusicDatabase>
+serialize_music_db(pqxx::connection &pq_conn) {
+  auto ret = std::make_unique<msgs::MusicDatabase>();
+
+  // Serialize all the music info
+  pqxx::work txn(pq_conn);
+  const char *track_select = "SELECT "
+                             "raw_path, "
+                             "parent_path, "
+                             "checksum, "
+                             "tag_title, "
+                             "tag_artist, "
+                             "tag_album, "
+                             "tag_year, "
+                             "tag_comment, "
+                             "tag_track, "
+                             "tag_genre "
+                             "FROM track";
+  for (auto const &row : txn.exec(track_select)) {
+    auto *track = ret->add_tracks();
+    track->set_raw_path(row[0].as<std::string>());
+    track->set_parent_path(row[1].as<std::string>());
+    track->set_checksum(row[2].as<std::string>());
+    track->set_tag_title(row[3].as<std::string>());
+    track->set_tag_artist(row[4].as<std::string>());
+    track->set_tag_album(row[5].as<std::string>());
+    track->set_tag_year(row[6].as<unsigned>());
+    track->set_tag_comment(row[7].as<std::string>());
+    track->set_tag_track(row[8].as<unsigned>());
+    track->set_tag_genre(row[9].as<std::string>());
+  }
+
+  // And all the image info
+  pqxx::result track_rows = txn.exec("SELECT * from image");
+
+  return ret;
+}
+
+template <typename T> void remove_in_vector(std::vector<T> &v, int idx) {
+  v[idx].swap(v.back());
+  v.pop_back();
+}
+
+template <>
+void remove_in_vector<struct pollfd>(std::vector<struct pollfd> &v, int idx) {
+  v[idx] = v.back();
+  v.pop_back();
+}
+
+int handle_packet_update_db(int fd, uint32_t nonce) {
+  LOG_I("Update db for fd %d\n", fd);
+  return 0;
+}
+
+int send_packet_response(int fd, uint32_t nonce, PacketOpcode opcode,
+                         std::string &data) {
+  // TODO: proper nonblocking
+  // TODO: iovec
+
+  // Prepend nonce and data size to paylaod
+  const std::string::size_type payload_size = data.size();
+  uint32_t header[3];
+  header[0] = nonce;
+  header[1] = static_cast<uint32_t>(opcode);
+  header[2] = payload_size;
+  data.insert(0, reinterpret_cast<char *>(header), sizeof(header));
+
+  unsigned total_sent = 0;
+  do {
+    ssize_t sent = ::send(fd, data.data() + total_sent,
+                          data.size() - total_sent, /* flags */ 0);
+    if (sent >= 0) {
+      total_sent += sent;
+    } else {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // TODO: hack
+        usleep(1000);
+      } else {
+        LOG_E("Failed to send data on fd %d: %d: %s\n", fd, errno,
+              strerror(errno));
+        return EXIT_FAILURE;
+      }
+    }
+  } while (total_sent < data.size());
+
+  return EXIT_SUCCESS;
+}
+
+int handle_packet_fetch_db(int fd, uint32_t nonce) {
+  LOG_I("Fetch db for fd %d\n", fd);
+  // Serialize database to pb
+  std::unique_ptr<msgs::MusicDatabase> db = serialize_music_db(pq_conn);
+
+  // Send our response
+  std::string pb_data;
+  db->SerializeToString(&pb_data);
+
+  LOG_I("Serialized DB size: %lu\n", pb_data.size());
+  return send_packet_response(fd, nonce, PacketOpcode::FETCH_DB, pb_data);
+}
+
+int handle_packet_fetch_track(int fd, uint32_t nonce, std::string req) {
+  LOG_I("Fetch track %s for fd %d\n", bytes_to_hex(req).c_str(), fd);
+  return 0;
+}
+
+int handle_packet_fetch_image(int fd, uint32_t nonce, std::string req) {
+  LOG_I("Fetch image %s for fd %d\n", bytes_to_hex(req).c_str(), fd);
+  return 0;
+}
+
+int handle_packet(int fd, uint32_t nonce, PacketOpcode cmd, std::string &data) {
+  switch (cmd) {
+  case PacketOpcode::UPDATE_REMOTE_DB: {
+    return handle_packet_update_db(fd, nonce);
+    break;
+  }
+  case PacketOpcode::FETCH_DB: {
+    return handle_packet_fetch_db(fd, nonce);
+    break;
+  }
+  case PacketOpcode::FETCH_TRACK: {
+    return handle_packet_fetch_track(fd, nonce, data);
+    break;
+  }
+  case PacketOpcode::FETCH_IMAGE: {
+    return handle_packet_fetch_image(fd, nonce, data);
+    break;
+  }
+  default: {
+    LOG_E("Unknown opcode %08x\n", static_cast<uint32_t>(cmd));
+    return -1;
+  }
+  }
+
+  return 0;
+}
+
+int process_incoming_data(int fd, std::string &slab) {
+  // Is there enough data to peek a packet header
+  static const unsigned HEADER_SIZE = sizeof(uint32_t) * 3;
+  if (slab.size() < HEADER_SIZE) {
+    // LOG_I("Slab size %lu < header size (%u)\n", slab.size(), HEADER_SIZE);
+    return 0;
+  }
+
+  // Pull off the packet header
+  uint32_t *data_32 = reinterpret_cast<uint32_t *>(slab.data());
+  const uint32_t nonce = data_32[0];
+  const uint32_t cmd = data_32[1];
+  const uint32_t data_len = data_32[2];
+
+  // If the data is not yet all here, return
+  if (slab.size() < data_len + HEADER_SIZE) {
+    LOG_I("Slab size %lu < header size (%u) + data len (%u)\n", slab.size(),
+          HEADER_SIZE, data_len);
+    return 0;
+  }
+
+  // If there _is_ enough data to pull off the entire packet, do so
+  std::string data = std::string(slab.data() + HEADER_SIZE, data_len);
+
+  // Remove this data from the front of the slab
+  slab.erase(0, HEADER_SIZE + data_len);
+
+  // Go handle whatever this packet is
+  return handle_packet(fd, nonce, PacketOpcode(cmd), data);
+}
+
 int main(int argc, char *argv[]) {
   // Init postgres
   if (!getenv("PGHOST") || !getenv("PGDATABASE") || !getenv("PGUSER") ||
       !getenv("PGPASSWORD")) {
     pgusage();
   }
-  pqxx::connection pq_conn;
+
   pq_prepare(pq_conn);
 
   // Check args
@@ -348,6 +584,211 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Usage: %s [Music Dir]\n", argv[0]);
   }
 
-  walk_music_dir(pq_conn, argv[1]);
-  return 0;
+  const char *bind_addr = "0.0.0.0";
+  const char *bind_port = "5959";
+
+  // Try and resolve the bind address / port
+  struct addrinfo hints = {};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
+  struct addrinfo *servinfo;
+  int err = getaddrinfo(bind_addr, bind_port, &hints, &servinfo);
+  if (err != 0) {
+    LOG_E("getaddrinfo: %s\n", gai_strerror(err));
+    return EXIT_FAILURE;
+  }
+
+  // Loop through the results and bind to the first thing we can
+  struct addrinfo *p = nullptr;
+  int sockfd;
+  for (p = servinfo; p != nullptr; p = p->ai_next) {
+    if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+      LOG_I("socket: %s\n", strerror(errno));
+      continue;
+    }
+
+    const int yes = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+      LOG_E("setsockopt: %s\n", strerror(errno));
+      continue;
+    }
+
+    if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+      LOG_E("bind: %s\n", strerror(errno));
+      close(sockfd);
+      continue;
+    }
+
+    break;
+  }
+  freeaddrinfo(servinfo);
+
+  // If we iterated all the way to the end of the addrinfo list without
+  // managing to bind something, then we did not successfully create a listen
+  // socket.
+  if (!p) {
+    LOG_E("failed to bind to %s: %s\n", bind_addr, bind_port);
+    return EXIT_FAILURE;
+  }
+
+  // Enable listen
+  if (listen(sockfd, /* backlog */ 64) == -1) {
+    LOG_E("listen: %s\n", strerror(errno));
+    return EXIT_FAILURE;
+  }
+
+  // Nonblocking
+  if (set_socket_nonblocking(sockfd)) {
+    return EXIT_FAILURE;
+  }
+
+  // Socket is up
+  LOG_I("%s: %s: listening\n", bind_addr, bind_port);
+
+  std::vector<struct pollfd> pollfds;
+  std::vector<std::string> slabs;
+
+  // Add listen socket to poll set
+
+  auto add_pollfd = [&](int fd) {
+    pollfds.emplace_back();
+    pollfds.back().fd = fd;
+    slabs.emplace_back();
+  };
+  auto remove_pollfd = [&](int index) {
+    remove_in_vector(pollfds, index);
+    remove_in_vector(slabs, index);
+  };
+
+  add_pollfd(sockfd);
+
+  while (true) {
+    int event_count = poll(pollfds.data(), pollfds.size(), /* timeout */ 1000);
+    if (event_count < 0) {
+      LOG_E("Poll error: %d: %s\n", errno, strerror(errno));
+      continue;
+    }
+
+    for (unsigned i = 0; i < pollfds.size(); i++) {
+      if (i == 0) {
+        // Listen socket
+        // Handle the listening socket.
+        if (pollfds[i].revents & POLLERR) {
+          LOG_E("Poll error for listen fd: %d: %s\n", errno, strerror(errno));
+          return EXIT_FAILURE;
+        }
+
+        struct sockaddr_storage their_addr = {};
+        socklen_t ss_size = sizeof(their_addr);
+        int conn_fd =
+            accept(pollfds[i].fd, (struct sockaddr *)&their_addr, &ss_size);
+        if (conn_fd == -1) {
+          switch (errno) {
+          case EINTR:
+            // If the call was interrupted, we just try again.
+            continue;
+            break;
+          case EAGAIN:
+            // If we would block, that's normal. Just keep trying.
+            continue;
+            break;
+          case ENETDOWN:
+          case EPROTO:
+          case ENOPROTOOPT:
+          case EHOSTDOWN:
+          case ENONET:
+          case EHOSTUNREACH:
+          case EOPNOTSUPP:
+          case ENETUNREACH:
+            LOG_E("accept: %d: %s\n", errno, strerror(errno));
+            continue;
+            break;
+          case EPERM:
+            LOG_E("accept: %d: %s\n", errno, strerror(errno));
+            continue;
+            break;
+          case EMFILE:
+          case ENFILE:
+          case ENOBUFS:
+          case ENOMEM:
+          default:
+            // A hard error. This kills the server.
+            LOG_E("accept: %d: %s\n", errno, strerror(errno));
+            return EXIT_FAILURE;
+            break;
+          }
+        }
+
+        // Get address of incoming connection
+        char inet_addr_str[INET6_ADDRSTRLEN];
+        auto get_in_addr = [](struct sockaddr *s) -> void * {
+          if (s->sa_family == AF_INET) {
+            return &(((struct sockaddr_in *)s)->sin_addr);
+          }
+          return &(((struct sockaddr_in6 *)s)->sin6_addr);
+        };
+        inet_ntop(their_addr.ss_family,
+                  get_in_addr((struct sockaddr *)&their_addr), inet_addr_str,
+                  sizeof(inet_addr_str));
+        LOG_I("Connection from %s on new fd %d\n", inet_addr_str, conn_fd);
+
+        // Setup the socket as desired.
+        set_socket_nonblocking(conn_fd);
+        set_socket_keepalive(conn_fd, /* interval secodns */ 10,
+                             /* tolerance */ 2);
+
+        add_pollfd(conn_fd);
+      } else {
+        // Client socket
+        // Problems with the socket?
+        if (pollfds[i].revents & (POLLERR | POLLHUP)) {
+          // Socket problem, disconnect them
+          LOG_I("Poll error for fd %d\n", pollfds[i].fd);
+          close(pollfds[i].fd);
+          remove_pollfd(i);
+          continue;
+        }
+
+        // Try and consume socket data
+        char buf[1024];
+        int read_size;
+        do {
+          read_size = read(pollfds[i].fd, buf, sizeof(buf));
+          if (read_size > 0) {
+            LOG_I("Rx'd %u bytes on fd %d\n", read_size, pollfds[i].fd);
+            slabs[i].append(buf, read_size);
+          } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+              // Fine
+              break;
+            } else {
+              LOG_E("read fd %d: %d: %s\n", pollfds[i].fd, errno,
+                    strerror(errno));
+              close(pollfds[i].fd);
+              remove_pollfd(i);
+
+              goto CONTINUE;
+            }
+          }
+        } while (read_size);
+
+        // If we didn't hit an error, we must have read data, so go process the
+        // current slab
+        int process_ok;
+        while ((process_ok = process_incoming_data(pollfds[i].fd, slabs[i])) >
+               0) {
+        }
+        if (process_ok < 0) {
+          LOG_E("Error processing packets on fd %d, closing\n", pollfds[i].fd);
+          close(pollfds[i].fd);
+          remove_pollfd(i);
+        }
+      CONTINUE:
+        continue;
+      }
+    }
+  }
+
+  return EXIT_SUCCESS;
 }

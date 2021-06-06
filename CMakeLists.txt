@@ -32,13 +32,24 @@ include_directories(${PC_LIBTAG_INCLUDE_DIRS})
 pkg_check_modules(PC_LIBPQ REQUIRED libpqxx)
 include_directories(${PC_LIBPQ_INCLUDE_DIRS})
 
+INCLUDE(FindProtobuf)
+FIND_PACKAGE(Protobuf REQUIRED)
+include_directories(${Protobuf_INCLUDE_DIRS})
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+PROTOBUF_GENERATE_CPP(PROTO_SRCS PROTO_HDRS
+    ${CMAKE_CURRENT_SOURCE_DIR}/pb/track.proto)
+
 add_executable(musicd
   src/musicd.cpp
+  ${PROTO_SRCS}
+  ${PROTO_HDRS}
 )
 target_link_libraries(musicd
   stdc++fs
   ${PC_LIBTAG_LIBRARIES}
   ${PC_LIBPQ_LIBRARIES}
+  ${Protobuf_LIBRARIES}
   ssl
   crypto
 )

@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package msgs;
+
+message Track {
+    string raw_path = 1;
+    bytes checksum = 2;
+    string parent_path = 3;
+
+    string tag_title = 4;
+    string tag_artist = 5;
+    string tag_album = 6;
+    uint32 tag_year = 7;
+    string tag_comment = 8;
+    uint32 tag_track = 9;
+    string tag_genre = 10;
+}
+
+message Image {
+    string raw_path = 1;
+    bytes checksum = 2;
+    string parent_path = 3;
+}
+
+message MusicDatabase {
+    repeated Track tracks = 1;
+    repeated Image images = 2;
+}
