@@ -31,6 +31,8 @@
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
 
+#include <Magick++.h>
+
 #include <track.pb.h>
 
 #define LOG_I(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
@@ -512,6 +514,8 @@ std::unique_ptr<std::string> fetch_object_by_checksum(pqxx::connection &pq_conn,
 
   // Extract the path
   const std::string path = rows[0][0].as<std::string>();
+  LOG_I("Content ID %s: Path %s\n", bytes_to_hex(checksum).c_str(),
+        path.c_str());
 
   // Read the file and return
   return read_file(path);
@@ -576,7 +580,7 @@ int send_packet_response(int fd, uint32_t nonce, PacketOpcode opcode,
     }
   } while (total_sent < data.size());
 
-  return EXIT_SUCCESS;
+  return total_sent;
 }
 
 int handle_packet_fetch_db(int fd, uint32_t nonce) {
@@ -624,13 +628,30 @@ int handle_packet_fetch_image(int fd, uint32_t nonce, std::string req) {
   // If not found, send zero-len response
   if (image_data == nullptr) {
     std::string empty_resp = "";
-    LOG_E("Failed to find track for checksum %s\n", bytes_to_hex(req).c_str());
+    LOG_E("Failed to find image for checksum %s\n", bytes_to_hex(req).c_str());
     return send_packet_response(fd, nonce, PacketOpcode::FETCH_IMAGE,
                                 empty_resp);
   }
 
+  // Otherwise, we have valid image data - ensure it's shrunk down if doing so
+  // will actually make it smaller
+  const std::string::size_type initial_image_size = image_data->size();
+  try {
+    Magick::Blob blob(image_data->data(), image_data->size());
+    Magick::Image raw_image(blob);
+    raw_image.resize("512x512");
+    raw_image.magick("JPEG");
+    raw_image.write(&blob);
+    const std::string::size_type final_image_size = blob.length();
+    if (final_image_size < initial_image_size) {
+      image_data->assign((const char *)blob.data(), blob.length());
+    }
+  } catch (Magick::WarningCorruptImage &e) {
+    LOG_E("Failed to resize image: %s\n", e.what());
+  }
+
   // Otherwise, send full data back
-  LOG_I("Sending response for image %s size %lu\n", bytes_to_hex(req).c_str(),
+  LOG_I("Sending response for image %s, size %lu\n", bytes_to_hex(req).c_str(),
         image_data->size());
   return send_packet_response(fd, nonce, PacketOpcode::FETCH_IMAGE,
                               *image_data);
@@ -700,13 +721,15 @@ int main(int argc, char *argv[]) {
       !getenv("PGPASSWORD")) {
     pgusage();
   }
-
   pq_prepare(pq_conn);
 
   // Check args
   if (argc != 2) {
     fprintf(stderr, "Usage: %s [Music Dir]\n", argv[0]);
   }
+
+  // Init imagemagick
+  Magick::InitializeMagick(*argv);
 
   const char *bind_addr = "0.0.0.0";
   const char *bind_port = "5959";
@@ -778,6 +801,7 @@ int main(int argc, char *argv[]) {
   auto add_pollfd = [&](int fd) {
     pollfds.emplace_back();
     pollfds.back().fd = fd;
+    pollfds.back().events = POLLIN;
     slabs.emplace_back();
   };
   auto remove_pollfd = [&](int index) {

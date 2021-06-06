@@ -37,6 +37,10 @@ FIND_PACKAGE(Protobuf REQUIRED)
 include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
+INCLUDE(FindImageMagick)
+FIND_PACKAGE(ImageMagick REQUIRED COMPONENTS Magick++)
+include_directories(${ImageMagick_INCLUDE_DIRS})
+
 PROTOBUF_GENERATE_CPP(PROTO_SRCS PROTO_HDRS
     ${CMAKE_CURRENT_SOURCE_DIR}/pb/track.proto)
 
@@ -45,11 +49,16 @@ add_executable(musicd
   ${PROTO_SRCS}
   ${PROTO_HDRS}
 )
+target_compile_definitions(musicd
+    PUBLIC -DMAGICKCORE_QUANTUM_DEPTH=16
+    PUBLIC -DMAGICKCORE_HDRI_ENABLE=false
+)
 target_link_libraries(musicd
   stdc++fs
   ${PC_LIBTAG_LIBRARIES}
   ${PC_LIBPQ_LIBRARIES}
   ${Protobuf_LIBRARIES}
+  ${ImageMagick_LIBRARIES}
   ssl
   crypto
 )
