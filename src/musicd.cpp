@@ -19,9 +19,11 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <thread>
 
 #include <openssl/sha.h>
 
@@ -85,6 +87,9 @@ enum class PacketOpcode : uint32_t {
 };
 
 pqxx::connection pq_conn;
+
+std::atomic<bool> db_thread_update_request{false};
+std::thread db_update_thread;
 
 void pq_prepare(pqxx::connection &conn) {
   conn.prepare(INSERT_TRACK, "INSERT INTO track ("
@@ -369,6 +374,12 @@ void walk_music_dir(pqxx::connection &pq_conn, const char *path) {
   // Create a new transaction
   pqxx::work pq_transaction(pq_conn);
 
+  // Delete all the old data in the db
+  auto trunc_track_result = pq_transaction.exec("DELETE FROM track");
+  auto trunc_image_result = pq_transaction.exec("DELETE FROM image");
+  LOG_I("Truncated %lu old tracks / %lu old images\n",
+        trunc_track_result.affected_rows(), trunc_image_result.affected_rows());
+
   // Canonicalize base path
   std::filesystem::path base_path(path);
 
@@ -555,6 +566,7 @@ void remove_in_vector<struct pollfd>(std::vector<struct pollfd> &v, int idx) {
 
 int handle_packet_update_db(int fd, uint32_t nonce) {
   LOG_I("Update db for fd %d\n", fd);
+  db_thread_update_request.store(true);
   return 0;
 }
 
@@ -730,18 +742,30 @@ int main(int argc, char *argv[]) {
       !getenv("PGPASSWORD")) {
     pgusage();
   }
+  pqxx::thread_safety_model pqxx_model = pqxx::describe_thread_safety();
+  LOG_I("Pqxx thread-safe? %s - %s", pqxx_model.safe_libpq ? "yes" : "no",
+        pqxx_model.description.c_str());
+
   pq_prepare(pq_conn);
 
   // Check args
   if (argc != 2) {
     fprintf(stderr, "Usage: %s [Music Dir]\n", argv[0]);
   }
+  const char *music_basedir = argv[1];
 
   // Init imagemagick
   Magick::InitializeMagick(*argv);
 
-  // Update music database
-  walk_music_dir(pq_conn, argv[1]);
+  // Spawn filesystem crawler thread
+  db_update_thread = std::thread([&]() {
+    while (true) {
+      if (db_thread_update_request.exchange(false)) {
+        walk_music_dir(pq_conn, music_basedir);
+      }
+      usleep(1'000'000);
+    }
+  });
 
   const char *bind_addr = "0.0.0.0";
   const char *bind_port = "5959";
