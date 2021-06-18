@@ -41,6 +41,13 @@ INCLUDE(FindImageMagick)
 FIND_PACKAGE(ImageMagick REQUIRED COMPONENTS Magick++)
 include_directories(${ImageMagick_INCLUDE_DIRS})
 
+pkg_check_modules(LIBAV_FORMAT REQUIRED libavformat)
+pkg_check_modules(LIBAV_CODEC REQUIRED libavcodec)
+pkg_check_modules(LIBAV_UTIL REQUIRED libavutil)
+include_directories(${LIBAV_FORMAT_INCLUDE_DIRS})
+include_directories(${LIBAV_CODEC_INCLUDE_DIRS})
+include_directories(${LIBAV_UTIL_INCLUDE_DIRS})
+
 PROTOBUF_GENERATE_CPP(PROTO_SRCS PROTO_HDRS
     ${CMAKE_CURRENT_SOURCE_DIR}/pb/track.proto)
 
@@ -61,4 +68,7 @@ target_link_libraries(musicd
   ${ImageMagick_LIBRARIES}
   ssl
   crypto
+  ${LIBAV_FORMAT_LIBRARIES}
+  ${LIBAV_CODEC_LIBRARIES}
+  ${LIBAV_UTIL_LIBRARIES}
 )

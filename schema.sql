@@ -3,6 +3,7 @@ create table track (
     raw_path text,
     parent_path text,
     checksum bytea,
+    file_mtime timestamp without time zone,
 
     -- Music tag info
     tag_title text,
@@ -21,6 +22,7 @@ create table image (
     raw_path text,
     parent_path text,
     checksum bytea,
+    file_mtime timestamp without time zone,
 
     unique(checksum)
 );

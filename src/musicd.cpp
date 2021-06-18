@@ -27,6 +27,11 @@
 
 #include <openssl/sha.h>
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+}
+
 #include <pqxx/binarystring>
 #include <pqxx/pqxx>
 
@@ -63,6 +68,8 @@ static const char *SELECT_TRACK_PATH_BY_CHECKSUM =
     "pq_SELECT_TRACK_PATH_BY_CHECKSUM";
 static const char *SELECT_IMAGE_PATH_BY_CHECKSUM =
     "pq_SELECT_IMAGE_PATH_BY_CHECKSUM";
+static const char *DELETE_TRACK_BY_CHECKSUM = "DELETE_TRACK_BY_CHECKSUM";
+static const char *DELETE_IMAGE_BY_CHECKSUM = "DELETE_IMAGE_BY_CHECKSUM";
 
 enum class PacketOpcode : uint32_t {
   // Trigger update of remote database
@@ -96,6 +103,7 @@ void pq_prepare(pqxx::connection &conn) {
                              "raw_path, "
                              "parent_path, "
                              "checksum, "
+                             "file_mtime, "
                              "tag_title, "
                              "tag_artist, "
                              "tag_album, "
@@ -113,7 +121,8 @@ void pq_prepare(pqxx::connection &conn) {
                              "$7, "
                              "$8, "
                              "$9, "
-                             "$10 "
+                             "$10, "
+                             "$11 "
                              ") ON CONFLICT (checksum) DO UPDATE SET "
                              "raw_path = EXCLUDED.raw_path, "
                              "parent_path = EXCLUDED.parent_path, "
@@ -129,11 +138,13 @@ void pq_prepare(pqxx::connection &conn) {
   conn.prepare(INSERT_IMAGE, "INSERT INTO image ("
                              "raw_path, "
                              "parent_path, "
-                             "checksum "
+                             "checksum, "
+                             "file_mtime "
                              ") VALUES ( "
                              "$1, "
                              "$2, "
-                             "$3 "
+                             "$3, "
+                             "$4 "
                              ") ON CONFLICT (checksum) DO UPDATE SET "
                              "raw_path = EXCLUDED.raw_path, "
                              "parent_path = EXCLUDED.parent_path ");
@@ -143,6 +154,12 @@ void pq_prepare(pqxx::connection &conn) {
 
   conn.prepare(SELECT_IMAGE_PATH_BY_CHECKSUM,
                "SELECT raw_path FROM image WHERE checksum = $1");
+
+  conn.prepare(DELETE_TRACK_BY_CHECKSUM,
+               "DELETE FROM track WHERE checksum = $1");
+
+  conn.prepare(DELETE_IMAGE_BY_CHECKSUM,
+               "DELETE FROM image WHERE checksum = $1");
 }
 
 const std::string bytes_to_hex(const std::string &bytes) {
@@ -316,6 +333,32 @@ std::unique_ptr<ImageFile> parse_image_file(const std::string &path) {
 
 void ingest_music_file(pqxx::work &pq_transaction, const std::string &base_path,
                        const std::string &path) {
+  // Stat the file to get its mtime
+  int64_t fs_mtime =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::filesystem::last_write_time(path).time_since_epoch())
+          .count();
+
+  // If the file modification time is older than the DB record, do not bother
+  {
+    // Query to see if this file is already ingested
+    const auto existing_track_result = pq_transaction.exec_params(
+        "SELECT checksum, file_mtime FROM track WHERE raw_path = $1", path);
+
+    // Do we already have an entry?
+    if (existing_track_result.size() > 0) {
+      // Extract the mtime from the DB row
+      const auto &row = existing_track_result[0];
+      const std::string checksum = pqxx::binarystring(row[0]).str();
+      const int64_t db_mtime = row[1].as<int64_t>();
+
+      // If the DB time is more recent, skip
+      if (db_mtime > fs_mtime) {
+        return;
+      }
+    }
+  }
+
   // Try and load our required metadata
   auto music_file = parse_music_file(path);
   if (!music_file) {
@@ -326,17 +369,121 @@ void ingest_music_file(pqxx::work &pq_transaction, const std::string &base_path,
 
   // Save to the db
   pq_transaction
-      .prepared(INSERT_TRACK)(music_file->path)(
-          music_file->parent_path(base_path))(
-          pqxx::binarystring(music_file->checksum))(music_file->tags.title)(
-          music_file->tags.artist)(music_file->tags.album)(
-          music_file->tags.year)(music_file->tags.comment)(
-          music_file->tags.track)(music_file->tags.genre)
+      .prepared(INSERT_TRACK)(music_file->path)(music_file->parent_path(
+          base_path))(pqxx::binarystring(music_file->checksum))(fs_mtime)(
+          music_file->tags.title)(music_file->tags.artist)(
+          music_file->tags.album)(music_file->tags.year)(
+          music_file->tags.comment)(music_file->tags.track)(
+          music_file->tags.genre)
       .exec();
+}
+
+bool transcode_track(const char *track_path) {
+  auto print_av_err = [](const char *msg, int err) {
+    if (err) {
+      char err_buf[AV_ERROR_MAX_STRING_SIZE];
+      av_strerror(err, err_buf, sizeof(err_buf));
+      LOG_E("%s: %d: %s\n", msg, err, err_buf);
+    }
+  };
+
+  // Create an avformat context
+  AVFormatContext *avfc = avformat_alloc_context();
+  if (avfc == nullptr) {
+    LOG_E("Failed to create avformat context\n");
+    return false;
+  }
+  std::shared_ptr<void> _defer_free_avfc(
+      nullptr, [=](...) { avformat_free_context(avfc); });
+
+  // Attempt to open the source track
+  int err =
+      avformat_open_input(&avfc, track_path, /* autodetect format */ nullptr,
+                          /* options */ nullptr);
+  if (err < 0) {
+    print_av_err("avformat_open_input", err);
+    return false;
+  }
+
+  // Detect streams
+  err = avformat_find_stream_info(avfc, nullptr);
+  if (err < 0) {
+    print_av_err("avformat_find_stream_info", err);
+    return false;
+  }
+
+  // Check stream info
+  LOG_I("Found %d streams\n", avfc->nb_streams);
+
+  // Locate the MP3 encoder
+  AVCodec *mp3_codec = avcodec_find_encoder(AVCodecID::AV_CODEC_ID_MP3);
+  if (mp3_codec == nullptr) {
+    LOG_E("Failed to load MP3 encoder\n");
+    return false;
+  }
+
+  // Create an avcodec context using the MP3 encoder
+  AVCodecContext *avcc = avcodec_alloc_context3(mp3_codec);
+  if (avcc == nullptr) {
+    LOG_E("Failed to create avcodec context\n");
+    return false;
+  }
+  std::shared_ptr<void> _defer_free_avcc(
+      nullptr, [&](...) { avcodec_free_context(&avcc); });
+
+  // VBR V0 encode target
+  avcc->flags |= AV_CODEC_FLAG_QSCALE;
+  avcc->global_quality = 0;
+
+  AVFrame *input_frame = av_frame_alloc();
+  AVPacket *input_packet = av_packet_alloc();
+
+  while (av_read_frame(decoder_avfc, input_packet) >= 0) {
+    int response = avcodec_send_packet(decoder_audio_avcc, input_packet);
+    while (response >= 0) {
+      response = avcodec_receive_frame(decoder_audio_avcc, input_frame));
+      if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
+        break;
+      } else if (response < 0) {
+        print_av_err("avcodec_receive_frame", response);
+        return false;
+      }
+
+      encode(encoder_avfc, de
+    }
+  }
+
+  return true;
 }
 
 void ingest_image_file(pqxx::work &pq_transaction, const std::string &base_path,
                        const std::string &path) {
+  // Stat the file to get its mtime
+  int64_t fs_mtime =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::filesystem::last_write_time(path).time_since_epoch())
+          .count();
+
+  // If the file modification time is older than the DB record, do not bother
+  {
+    // Query to see if this file is already ingested
+    const auto existing_image_result = pq_transaction.exec_params(
+        "SELECT checksum, file_mtime FROM image WHERE raw_path = $1", path);
+
+    // Do we already have an entry?
+    if (existing_image_result.size() > 0) {
+      // Extract the mtime from the DB row
+      const auto &row = existing_image_result[0];
+      const std::string checksum = pqxx::binarystring(row[0]).str();
+      const int64_t db_mtime = row[1].as<int64_t>();
+
+      // If the DB time is more recent, skip
+      if (db_mtime > fs_mtime) {
+        return;
+      }
+    }
+  }
+
   // Try and load our required metadata
   auto image_file = parse_image_file(path);
   if (!image_file) {
@@ -346,7 +493,7 @@ void ingest_image_file(pqxx::work &pq_transaction, const std::string &base_path,
   // Save to the db
   pq_transaction
       .prepared(INSERT_IMAGE)(image_file->path)(image_file->parent_path(
-          base_path))(pqxx::binarystring(image_file->checksum))
+          base_path))(pqxx::binarystring(image_file->checksum))(fs_mtime)
       .exec();
 }
 
@@ -373,6 +520,42 @@ void ingest_file(pqxx::work &pq_transaction,
 void walk_music_dir(pqxx::connection &pq_conn, const char *path) {
   // Create a new transaction
   pqxx::work pq_transaction(pq_conn);
+
+  // First, iterate the DB and delete any entries that no longer map to existing
+  // files
+  {
+    // Tracks
+    for (const auto &track_row :
+         pq_transaction.exec("SELECT raw_path, checksum FROM track")) {
+      const std::string path = track_row[0].as<std::string>();
+      const std::string checksum = pqxx::binarystring(track_row[2]).str();
+
+      // Does this file still exist?
+      if (std::filesystem::exists(path)) {
+        // It does, keep the db entry around
+        continue;
+      }
+
+      // If the file is gone, delete this DB entry
+      pq_transaction.prepared(DELETE_TRACK_BY_CHECKSUM)(checksum).exec();
+    }
+
+    // Images
+    for (const auto &image_row :
+         pq_transaction.exec("SELECT raw_path, checksum FROM image")) {
+      const std::string path = image_row[0].as<std::string>();
+      const std::string checksum = pqxx::binarystring(image_row[2]).str();
+
+      // Does this file still exist?
+      if (std::filesystem::exists(path)) {
+        // It does, keep the db entry around
+        continue;
+      }
+
+      // If the file is gone, delete this DB entry
+      pq_transaction.prepared(DELETE_IMAGE_BY_CHECKSUM)(checksum).exec();
+    }
+  }
 
   // Delete all the old data in the db
   auto trunc_track_result = pq_transaction.exec("DELETE FROM track");
