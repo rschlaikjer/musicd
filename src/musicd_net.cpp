@@ -258,6 +258,8 @@ int NetServer::send_packet_response(int fd, uint32_t nonce, PacketOpcode opcode,
       }
     }
   } while (total_sent < data.size());
+  LOG_I("Send response of size %lu on fd %d for nonce %08x\n", data.size(), fd,
+        nonce);
 
   return total_sent;
 }
@@ -265,7 +267,8 @@ int NetServer::send_packet_response(int fd, uint32_t nonce, PacketOpcode opcode,
 int NetServer::handle_packet_update_db(int fd, uint32_t nonce) {
   LOG_I("Update db for fd %d\n", fd);
   _db_thread_update_request.store(true);
-  return 0;
+  std::string empty = "";
+  return send_packet_response(fd, nonce, PacketOpcode::UPDATE_REMOTE_DB, empty);
 }
 
 int NetServer::handle_packet_fetch_db(int fd, uint32_t nonce) {
