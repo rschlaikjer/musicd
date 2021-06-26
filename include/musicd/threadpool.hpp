@@ -6,10 +6,11 @@
 class ThreadPool {
 
 public:
+  ThreadPool() {}
   ThreadPool(int n_workers, std::function<void()> worker_fun) {
-    _workers.resize(n_workers);
+    _workers.reserve(n_workers);
     for (int i = 0; i < n_workers; i++) {
-      _workers[i] = std::thread(worker_fun);
+      _workers.emplace_back(worker_fun);
     }
   }
   ~ThreadPool() {

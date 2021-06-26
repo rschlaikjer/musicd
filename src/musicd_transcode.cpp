@@ -254,7 +254,7 @@ bool av_encode_from_fifo(AVAudioFifo *audio_fifo, const char *output_path) {
 
   // Create an output context
   AVFormatContext *encoder_avfc;
-  avformat_alloc_output_context2(&encoder_avfc, nullptr, nullptr, output_path);
+  avformat_alloc_output_context2(&encoder_avfc, nullptr, "mp3", output_path);
   if (encoder_avfc == nullptr) {
     LOG_E("Failed to create encoder output format context\n");
     return false;

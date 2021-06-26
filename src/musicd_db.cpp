@@ -163,9 +163,13 @@ void ingest_music_file(pqxx::work &pq_transaction, const std::string &base_path,
       const int64_t db_mtime = row[1].as<int64_t>();
 
       // If the DB time is more recent, skip
-      if (db_mtime > fs_mtime) {
+      if (db_mtime >= fs_mtime) {
         return;
       }
+
+      // If the mtime is newer, delete the old record so that we can replace it
+      pq_transaction.exec_params("DELETE FROM track WHERE checksum = $1",
+                                 pqxx::binarystring(checksum));
     }
   }
 
@@ -210,9 +214,13 @@ void ingest_image_file(pqxx::work &pq_transaction, const std::string &base_path,
       const int64_t db_mtime = row[1].as<int64_t>();
 
       // If the DB time is more recent, skip
-      if (db_mtime > fs_mtime) {
+      if (db_mtime >= fs_mtime) {
         return;
       }
+
+      // If the mtime is newer, delete the old record so that we can replace it
+      pq_transaction.exec_params("DELETE FROM track WHERE checksum = $1",
+                                 pqxx::binarystring(checksum));
     }
   }
 
@@ -260,7 +268,7 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
     for (const auto &track_row :
          pq_transaction.exec("SELECT raw_path, checksum FROM track")) {
       const std::string path = track_row[0].as<std::string>();
-      const std::string checksum = pqxx::binarystring(track_row[2]).str();
+      const std::string checksum = pqxx::binarystring(track_row[1]).str();
 
       // Does this file still exist?
       if (std::filesystem::exists(path)) {
@@ -269,6 +277,7 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
       }
 
       // If the file is gone, delete this DB entry
+      LOG_I("Path %s disappeared, removing from DB\n", path.c_str());
       pq_transaction.prepared(DELETE_TRACK_BY_CHECKSUM)(checksum).exec();
     }
 
@@ -276,7 +285,7 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
     for (const auto &image_row :
          pq_transaction.exec("SELECT raw_path, checksum FROM image")) {
       const std::string path = image_row[0].as<std::string>();
-      const std::string checksum = pqxx::binarystring(image_row[2]).str();
+      const std::string checksum = pqxx::binarystring(image_row[1]).str();
 
       // Does this file still exist?
       if (std::filesystem::exists(path)) {
@@ -285,15 +294,10 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
       }
 
       // If the file is gone, delete this DB entry
+      LOG_I("Path %s disappeared, removing from DB\n", path.c_str());
       pq_transaction.prepared(DELETE_IMAGE_BY_CHECKSUM)(checksum).exec();
     }
   }
-
-  // Delete all the old data in the db
-  auto trunc_track_result = pq_transaction.exec("DELETE FROM track");
-  auto trunc_image_result = pq_transaction.exec("DELETE FROM image");
-  LOG_I("Truncated %lu old tracks / %lu old images\n",
-        trunc_track_result.affected_rows(), trunc_image_result.affected_rows());
 
   // Canonicalize base path
   std::filesystem::path base_path(path);
@@ -355,25 +359,46 @@ serialize_music_db(pqxx::connection &pq_conn) {
   return ret;
 }
 
-std::unique_ptr<std::string> fetch_object_by_checksum(pqxx::connection &pq_conn,
-                                                      const char *query,
-                                                      std::string checksum) {
+std::string fetch_object_path_by_checksum(pqxx::connection &pq_conn,
+                                          const char *query,
+                                          std::string checksum) {
   // Look up the path for this checksum
   pqxx::work txn(pq_conn);
   pqxx::result rows = txn.exec_prepared(query, pqxx::binarystring(checksum));
 
   // If it doesn't exist, return null
   if (rows.size() == 0) {
-    return nullptr;
+    return "";
   }
 
   // Extract the path
-  const std::string path = rows[0][0].as<std::string>();
-  LOG_I("Content ID %s: Path %s\n", bytes_to_hex(checksum).c_str(),
-        path.c_str());
+  return rows[0][0].as<std::string>();
+}
+
+std::unique_ptr<std::string> fetch_object_by_checksum(pqxx::connection &pq_conn,
+                                                      const char *query,
+                                                      std::string checksum) {
+  // Try and fetch the path
+  const std::string path =
+      fetch_object_path_by_checksum(pq_conn, query, checksum);
+  if (path.empty()) {
+    return nullptr;
+  }
 
   // Read the file and return
   return read_file(path);
+}
+
+std::string fetch_track_path_by_checksum(pqxx::connection &pq_conn,
+                                         std::string checksum) {
+  return fetch_object_path_by_checksum(pq_conn, SELECT_TRACK_PATH_BY_CHECKSUM,
+                                       checksum);
+}
+
+std::string fetch_image_path_by_checksum(pqxx::connection &pq_conn,
+                                         std::string checksum) {
+  return fetch_object_path_by_checksum(pq_conn, SELECT_TRACK_PATH_BY_CHECKSUM,
+                                       checksum);
 }
 
 std::unique_ptr<std::string> fetch_track_by_checksum(pqxx::connection &pq_conn,

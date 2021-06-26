@@ -24,8 +24,9 @@ int main(int argc, char *argv[]) {
   }
 
   // Check args
-  if (argc != 2) {
+  if (argc != 3) {
     fprintf(stderr, "Usage: %s [Music Dir] [Cache Dir]\n", argv[0]);
+    return EXIT_FAILURE;
   }
 
   // Init imagemagick

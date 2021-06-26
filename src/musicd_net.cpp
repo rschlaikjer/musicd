@@ -18,6 +18,7 @@
 #include <musicd/db.hpp>
 #include <musicd/log.hpp>
 #include <musicd/net.hpp>
+#include <musicd/transcode.hpp>
 
 template <typename T> void remove_in_vector(std::vector<T> &v, int idx) {
   v[idx].swap(v.back());
@@ -71,7 +72,70 @@ int set_socket_keepalive(int fd, int interval, int tolerance) {
   return ok;
 }
 
-NetServer::NetServer(Settings settings) : _settings(settings) {
+void NetServer::queue_transcode_for_socket_nonce(int fd, uint32_t nonce,
+                                                 const std::string &hash) {
+
+  // Lock the transcode queue
+  std::unique_lock<std::mutex> lock(_transcode_queue_mutex);
+
+  // Emplace the job
+  TranscodeJob job;
+  job.fd = fd;
+  job.nonce = nonce;
+  job.hash = hash;
+  job.input_path = fetch_track_path_by_checksum(_pq_conn, job.hash);
+  _transcode_request_queue.emplace_back(job);
+
+  // Notify a worker
+  _transcode_queue_cv.notify_one();
+}
+
+void NetServer::transcode_worker_loop() {
+  while (true) {
+
+    // If there is an entry we can process, pop it
+    TranscodeJob job;
+    {
+      // Lock the transcode queue
+      std::unique_lock<std::mutex> lock(_transcode_queue_mutex);
+      if (_transcode_request_queue.size() > 0) {
+        job = _transcode_request_queue.front();
+        _transcode_request_queue.pop_front();
+      } else {
+        // Wait for something to get enqueued
+        _transcode_queue_cv.wait(lock);
+        continue;
+      }
+    }
+
+    // If we got a job to process, go transcode it
+    LOG_I("Worker received transcode job for content hash %s\n",
+          bytes_to_hex(job.hash).c_str());
+
+    // Generate the cache file path
+    const std::string transcode_path = cache_path(job.hash);
+
+    // Go transcode the file
+    const bool transcode_ok =
+        transcode_track(job.input_path.c_str(), transcode_path.c_str());
+    job.success = transcode_ok;
+    LOG_I("Transcode %s for source track %s\n", transcode_ok ? "OK" : "FAILURE",
+          job.input_path.c_str());
+
+    // Put the job on the output queue
+    {
+      std::unique_lock<std::mutex> lock(_transcode_queue_mutex);
+      _transcode_response_queue.emplace_back(job);
+    }
+  }
+}
+
+NetServer::NetServer(Settings settings)
+    : _settings(settings), _transcode_queue_mutex(), _transcode_queue_cv(),
+      _transcode_threadpool(
+          TRANSCODE_THREADPOOL_SIZE,
+          std::bind(&NetServer::transcode_worker_loop, this)) {
+
   // Prepare PQ connection
   pq_prepare(_pq_conn);
 
@@ -89,6 +153,15 @@ NetServer::NetServer(Settings settings) : _settings(settings) {
 NetServer::~NetServer() {}
 
 bool NetServer::init() {
+  // Ensure cache dir exists
+  if (!std::filesystem::exists(_settings.cache_dir)) {
+    if (!std::filesystem::create_directories(_settings.cache_dir)) {
+      LOG_E("Failed to create cache directory %s\n",
+            _settings.cache_dir.c_str());
+      return false;
+    }
+  }
+
   // Try and resolve the bind address / port
   struct addrinfo hints = {};
   hints.ai_family = AF_UNSPEC;
@@ -208,31 +281,47 @@ int NetServer::handle_packet_fetch_db(int fd, uint32_t nonce) {
   return send_packet_response(fd, nonce, PacketOpcode::FETCH_DB, pb_data);
 }
 
+std::string NetServer::cache_path(const std::string &hash) {
+  std::filesystem::path path(_settings.cache_dir);
+  path.append(bytes_to_hex(hash));
+  return path;
+}
+
 int NetServer::handle_packet_fetch_track(int fd, uint32_t nonce,
-                                         std::string req) {
-  LOG_I("Fetch track %s for fd %d\n", bytes_to_hex(req).c_str(), fd);
+                                         const std::string req) {
+  const std::string content_id_hex = bytes_to_hex(req);
+  LOG_I("Fetch track %s for fd %d\n", content_id_hex.c_str(), fd);
 
-  // Try and fetch a track with this checksum
-  std::unique_ptr<std::string> track_data =
-      fetch_track_by_checksum(_pq_conn, req);
+  // Does there exist a cached transcode of this track?
+  const std::string transcode_path = cache_path(req);
+  if (std::filesystem::exists(transcode_path)) {
+    // If it does, send it
+    std::unique_ptr<std::string> cached_data = read_file(transcode_path);
+    LOG_I("Sending cached response for track %s size %lu\n",
+          content_id_hex.c_str(), cached_data->size());
+    return send_packet_response(fd, nonce, PacketOpcode::FETCH_TRACK,
+                                *cached_data);
+  }
 
-  // If not found, send zero-len response
-  if (track_data == nullptr) {
+  // Does this content hash map to a file in the DB at all?
+  std::string track_path = fetch_track_path_by_checksum(_pq_conn, req);
+  if (track_path.empty()) {
     std::string empty_resp = "";
-    LOG_E("Failed to find track for checksum %s\n", bytes_to_hex(req).c_str());
+    LOG_E("Failed to find track for checksum %s\n", content_id_hex.c_str());
     return send_packet_response(fd, nonce, PacketOpcode::FETCH_TRACK,
                                 empty_resp);
   }
 
-  // Otherwise, send full data back
-  LOG_I("Sending response for track %s size %lu\n", bytes_to_hex(req).c_str(),
-        track_data->size());
-  return send_packet_response(fd, nonce, PacketOpcode::FETCH_TRACK,
-                              *track_data);
+  // If the source file is valid, queue a transcode op
+  LOG_I("Queueing transcode operation for fd %d, nonce %08x, track %s\n", fd,
+        nonce, track_path.c_str());
+  queue_transcode_for_socket_nonce(fd, nonce, req);
+
+  return 0;
 }
 
 int NetServer::handle_packet_fetch_image(int fd, uint32_t nonce,
-                                         std::string req) {
+                                         const std::string req) {
   LOG_I("Fetch image %s for fd %d\n", bytes_to_hex(req).c_str(), fd);
 
   // Try and fetch a image with this checksum
@@ -442,8 +531,8 @@ int NetServer::loop() {
           }
         } while (read_size);
 
-        // If we didn't hit an error, we must have read data, so go process the
-        // current slab
+        // If we didn't hit an error, we must have read data, so go process
+        // the current slab
         int process_ok;
         while ((process_ok = process_incoming_data(_pollfds[i].fd, _slabs[i])) >
                0) {

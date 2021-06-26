@@ -65,9 +65,16 @@ std::unique_ptr<msgs::MusicDatabase>
 serialize_music_db(pqxx::connection &pq_conn);
 
 // Fetch content blobs by checksum
+std::string fetch_object_path_by_checksum(pqxx::connection &pq_conn,
+                                          const char *query,
+                                          std::string checksum);
 std::unique_ptr<std::string> fetch_object_by_checksum(pqxx::connection &pq_conn,
                                                       const char *query,
                                                       std::string checksum);
+std::string fetch_track_path_by_checksum(pqxx::connection &pq_conn,
+                                         std::string checksum);
+std::string fetch_image_path_by_checksum(pqxx::connection &pq_conn,
+                                         std::string checksum);
 std::unique_ptr<std::string> fetch_track_by_checksum(pqxx::connection &pq_conn,
                                                      std::string checksum);
 std::unique_ptr<std::string> fetch_image_by_checksum(pqxx::connection &pq_conn,
