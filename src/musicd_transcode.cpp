@@ -1,29 +1,4 @@
-#include <dirent.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/tcp.h>
-#include <poll.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/timerfd.h>
-#include <sys/types.h>
-#include <sys/uio.h>
-#include <unistd.h>
-
-#include <atomic>
-#include <filesystem>
-#include <iomanip>
-#include <iostream>
-#include <thread>
+#include <memory>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -35,8 +10,10 @@ extern "C" {
 
 #include <lame/lame.h>
 
-#define LOG_I(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
-#define LOG_E(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#include <musicd/log.hpp>
+#include <musicd/transcode.hpp>
+
+namespace musicd {
 
 void print_av_err(const char *msg, int err) {
   if (err) {
@@ -240,15 +217,7 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
   return true;
 }
 
-bool transcode_track(const char *input_path, const char *output_path) {
-  // Attempt to load the input audio to a FIFO
-  AVAudioFifo *audio_fifo;
-  if (!av_decode_to_fifo(input_path, &audio_fifo)) {
-    return false;
-  }
-  std::shared_ptr<void> _defer_free_audio_fifo = std::shared_ptr<void>(
-      nullptr, [&](...) { av_audio_fifo_free(audio_fifo); });
-
+bool av_encode_from_fifo(AVAudioFifo *audio_fifo, const char *output_path) {
   // Locate the MP3 encoder
   AVCodec *mp3_codec = avcodec_find_encoder(AVCodecID::AV_CODEC_ID_MP3);
   if (mp3_codec == nullptr) {
@@ -410,19 +379,20 @@ bool transcode_track(const char *input_path, const char *output_path) {
   // Finalize the output file
   av_write_trailer(encoder_avfc);
 
-  av_packet_unref(output_packet);
-  av_packet_free(&output_packet);
-
   return true;
 }
 
-int main(int argc, char **argv) {
-  if (argc != 3) {
-    LOG_E("%s [input] [output]\n", argv[0]);
-    return EXIT_FAILURE;
+bool transcode_track(const char *input_path, const char *output_path) {
+  // Attempt to load the input audio to a FIFO
+  AVAudioFifo *audio_fifo;
+  if (!av_decode_to_fifo(input_path, &audio_fifo)) {
+    return false;
   }
+  std::shared_ptr<void> _defer_free_audio_fifo = std::shared_ptr<void>(
+      nullptr, [&](...) { av_audio_fifo_free(audio_fifo); });
 
-  transcode_track(argv[1], argv[2]);
-
-  return EXIT_SUCCESS;
+  // Try and encode the buffered data
+  return av_encode_from_fifo(audio_fifo, output_path);
 }
+
+} // namespace musicd

@@ -50,11 +50,17 @@ include_directories(${LIBAV_CODEC_INCLUDE_DIRS})
 include_directories(${LIBAV_UTIL_INCLUDE_DIRS})
 include_directories(${LIBSWRESAMPLE_INCLUDE_DIRS})
 
+include_directories(include)
+
 PROTOBUF_GENERATE_CPP(PROTO_SRCS PROTO_HDRS
     ${CMAKE_CURRENT_SOURCE_DIR}/pb/track.proto)
 
 add_executable(musicd
   src/musicd.cpp
+  src/musicd_transcode.cpp
+  src/musicd_db.cpp
+  src/musicd_net.cpp
+  src/musicd_utility.cpp
   ${PROTO_SRCS}
   ${PROTO_HDRS}
 )
@@ -63,24 +69,6 @@ target_compile_definitions(musicd
     PUBLIC -DMAGICKCORE_HDRI_ENABLE=false
 )
 target_link_libraries(musicd
-  stdc++fs
-  ${PC_LIBTAG_LIBRARIES}
-  ${PC_LIBPQ_LIBRARIES}
-  ${Protobuf_LIBRARIES}
-  ${ImageMagick_LIBRARIES}
-  ssl
-  crypto
-  ${LIBAV_FORMAT_LIBRARIES}
-  ${LIBAV_CODEC_LIBRARIES}
-  ${LIBAV_UTIL_LIBRARIES}
-)
-
-add_executable(transcode_test
-  src/transcode_test.cpp
-  ${PROTO_SRCS}
-  ${PROTO_HDRS}
-)
-target_link_libraries(transcode_test
   stdc++fs
   ${PC_LIBTAG_LIBRARIES}
   ${PC_LIBPQ_LIBRARIES}
