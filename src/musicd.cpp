@@ -3,6 +3,7 @@
 #include <Magick++.h>
 
 #include <musicd/net.hpp>
+#include <musicd/transcode.hpp>
 
 using namespace musicd;
 
@@ -31,6 +32,9 @@ int main(int argc, char *argv[]) {
 
   // Init imagemagick
   Magick::InitializeMagick(*argv);
+
+  // Print libav versions
+  print_transcode_versions();
 
   // Server settings
   NetServer::Settings settings;

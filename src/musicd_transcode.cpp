@@ -15,6 +15,13 @@ extern "C" {
 
 namespace musicd {
 
+void print_transcode_versions() {
+  fprintf(stderr, "avformat: version %u\n", avformat_version());
+  fprintf(stderr, "avcodec version %u\n", avcodec_version());
+  fprintf(stderr, "avutil version %u\n", avutil_version());
+  fprintf(stderr, "swresample version %u\n", swresample_version());
+}
+
 void print_av_err(const char *msg, int err) {
   if (err) {
     char err_buf[AV_ERROR_MAX_STRING_SIZE];
