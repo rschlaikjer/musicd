@@ -54,9 +54,6 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
     return false;
   }
 
-  // Check stream info
-  LOG_I("Found %d streams\n", decoder_avfc->nb_streams);
-
   // Locate the first audio stream
   int source_stream_index = -1;
   for (int i = 0; i < (int)decoder_avfc->nb_streams; i++) {
@@ -75,7 +72,6 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
     LOG_E("Failed to locate input audio stream\n");
     return false;
   }
-  LOG_I("Found source audio stream with index %d\n", source_stream_index);
 
   // Generate a decoder for this stream
   AVCodec *decoder_codec = avcodec_find_decoder(
@@ -211,8 +207,6 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
   }
 
   // Done decoding the input data
-  LOG_I("Loaded %d total samples into audio FIFO\n",
-        av_audio_fifo_size(audio_fifo));
   *fifo = audio_fifo;
   return true;
 }

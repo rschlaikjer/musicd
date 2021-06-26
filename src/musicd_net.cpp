@@ -532,7 +532,6 @@ int NetServer::loop() {
         do {
           read_size = read(_pollfds[i].fd, buf, sizeof(buf));
           if (read_size > 0) {
-            LOG_I("Rx'd %u bytes on fd %d\n", read_size, _pollfds[i].fd);
             _slabs[i].append(buf, read_size);
           } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
