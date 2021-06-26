@@ -36,7 +36,15 @@ enum class PacketOpcode : uint32_t {
 
 struct NetServer {
 
-  NetServer(const char *bind, const char *port, const char *music_dir);
+  struct Settings {
+    std::string bind_addr;
+    std::string bind_port;
+
+    std::string music_dir;
+    std::string cache_dir;
+  };
+
+  NetServer(Settings settings);
   ~NetServer();
 
   bool init();
@@ -58,10 +66,9 @@ protected:
   void remove_pollfd(int index);
 
 private:
-  const std::string _bind_addr;
-  const std::string _listen_port;
-  const std::string _music_basedir;
+  const Settings _settings;
 
+  // Client socket state
   std::vector<struct pollfd> _pollfds;
   std::vector<std::string> _slabs;
 

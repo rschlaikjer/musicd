@@ -25,17 +25,21 @@ int main(int argc, char *argv[]) {
 
   // Check args
   if (argc != 2) {
-    fprintf(stderr, "Usage: %s [Music Dir]\n", argv[0]);
+    fprintf(stderr, "Usage: %s [Music Dir] [Cache Dir]\n", argv[0]);
   }
-  const char *music_basedir = argv[1];
 
   // Init imagemagick
   Magick::InitializeMagick(*argv);
 
+  // Server settings
+  NetServer::Settings settings;
+  settings.bind_addr = "0.0.0.0";
+  settings.bind_port = "5959";
+  settings.music_dir = argv[1];
+  settings.cache_dir = argv[2];
+
   // Try and init the net server loop
-  const char *bind_addr = "0.0.0.0";
-  const char *bind_port = "5959";
-  NetServer server(bind_addr, bind_port, music_basedir);
+  NetServer server(settings);
   if (!server.init()) {
     return EXIT_FAILURE;
   }

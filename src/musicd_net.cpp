@@ -71,10 +71,7 @@ int set_socket_keepalive(int fd, int interval, int tolerance) {
   return ok;
 }
 
-NetServer::NetServer(const char *bind_addr, const char *bind_port,
-                     const char *music_dir)
-    : _bind_addr(bind_addr), _listen_port(bind_port),
-      _music_basedir(music_dir) {
+NetServer::NetServer(Settings settings) : _settings(settings) {
   // Prepare PQ connection
   pq_prepare(_pq_conn);
 
@@ -82,7 +79,7 @@ NetServer::NetServer(const char *bind_addr, const char *bind_port,
   _db_update_thread = std::thread([&]() {
     while (true) {
       if (_db_thread_update_request.exchange(false)) {
-        update_db(_pq_conn, _music_basedir.c_str());
+        update_db(_pq_conn, _settings.music_dir.c_str());
       }
       usleep(1'000'000);
     }
@@ -98,8 +95,8 @@ bool NetServer::init() {
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
   struct addrinfo *servinfo;
-  int err =
-      getaddrinfo(_bind_addr.c_str(), _listen_port.c_str(), &hints, &servinfo);
+  int err = getaddrinfo(_settings.bind_addr.c_str(),
+                        _settings.bind_port.c_str(), &hints, &servinfo);
   if (err != 0) {
     LOG_E("getaddrinfo: %s\n", gai_strerror(err));
     return false;
@@ -134,8 +131,8 @@ bool NetServer::init() {
   // managing to bind something, then we did not successfully create a listen
   // socket.
   if (!p) {
-    LOG_E("failed to bind to %s: %s\n", _bind_addr.c_str(),
-          _listen_port.c_str());
+    LOG_E("failed to bind to %s: %s\n", _settings.bind_addr.c_str(),
+          _settings.bind_port.c_str());
     return false;
   }
 
@@ -151,7 +148,8 @@ bool NetServer::init() {
   }
 
   // Socket is up
-  LOG_I("%s: %s: listening\n", _bind_addr.c_str(), _listen_port.c_str());
+  LOG_I("%s: %s: listening\n", _settings.bind_addr.c_str(),
+        _settings.bind_port.c_str());
   add_pollfd(sockfd);
 
   return true;
