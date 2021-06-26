@@ -431,6 +431,21 @@ int NetServer::loop() {
       continue;
     }
 
+    // Check if any transcode ops completed and need to be dispatched
+    {
+      std::unique_lock<std::mutex> lock(_transcode_queue_mutex);
+      while (!_transcode_response_queue.empty()) {
+        TranscodeJob job = _transcode_response_queue.front();
+        _transcode_response_queue.pop_front();
+
+        // Look up the fd, and if it's still valid, send the response data
+        std::unique_ptr<std::string> cached_data =
+            read_file(cache_path(job.hash));
+        send_packet_response(job.fd, job.nonce, PacketOpcode::FETCH_TRACK,
+                             *cached_data);
+      }
+    }
+
     for (unsigned i = 0; i < _pollfds.size(); i++) {
       if (i == 0) {
         // Listen socket
