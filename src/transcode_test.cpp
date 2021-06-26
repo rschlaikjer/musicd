@@ -53,8 +53,11 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
     LOG_E("Failed to create decoder avformat context\n");
     return false;
   }
-  std::shared_ptr<void> _defer_free_avfc(
-      nullptr, [=](...) { avformat_free_context(decoder_avfc); });
+  std::shared_ptr<void> _defer_free_avfc(nullptr, [&](...) {
+    if (decoder_avfc != nullptr) {
+      avformat_free_context(decoder_avfc);
+    }
+  });
 
   // Attempt to open the source track
   int err = avformat_open_input(&decoder_avfc, input_path,
@@ -64,6 +67,8 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
     print_av_err("avformat_open_input", err);
     return false;
   }
+  std::shared_ptr<void> _defer_close_input(
+      nullptr, [&](...) { avformat_close_input(&decoder_avfc); });
 
   // Detect streams
   err = avformat_find_stream_info(decoder_avfc, nullptr);
@@ -196,6 +201,10 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
 
   // Consume the decoder context until we hit EOF
   while (av_read_frame(decoder_avfc, input_packet) >= 0) {
+    // Ensure packet gets unref'd when done
+    std::shared_ptr<void> _defer_unref_packet = std::shared_ptr<void>(
+        nullptr, [=](...) { av_packet_unref(input_packet); });
+
     int response = avcodec_send_packet(decoder_avcc, input_packet);
     while (response >= 0) {
       response = avcodec_receive_frame(decoder_avcc, input_frame);
@@ -298,12 +307,17 @@ bool transcode_track(const char *input_path, const char *output_path) {
   }
 
   // Try and create the output file
+  std::shared_ptr<void> _defer_avio_close;
   if (!(encoder_avfc->oformat->flags & AVFMT_NOFILE)) {
     if ((err = avio_open(&encoder_avfc->pb, output_path, AVIO_FLAG_WRITE)) <
         0) {
       print_av_err("avio_open", err);
       return false;
     }
+
+    // Defer close
+    _defer_avio_close = std::shared_ptr<void>(
+        nullptr, [&](...) { avio_close(encoder_avfc->pb); });
   }
 
   // Write the output header

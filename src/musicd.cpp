@@ -438,6 +438,15 @@ bool transcode_track(const char *track_path) {
   AVFrame *input_frame = av_frame_alloc();
   AVPacket *input_packet = av_packet_alloc();
 
+  // Create an audio FIFO to hold the decoded stream
+  AVSampleFormat raw_sample_fmt = AV_SAMPLE_FMT_FLTP;
+  const int channels = 2;
+  AVAudioFifo *audio_fifo =
+      av_audio_fifo_alloc(raw_sample_fmt, channels, /* nb_samples */ 0);
+  std::shared_ptr<void> _defer_close_fifo(
+      nullptr, [=](...) { av_audio_fifo_free(audio_fifo); });
+
+  // Consume the decoder context until we hit EOF
   while (av_read_frame(decoder_avfc, input_packet) >= 0) {
     int response = avcodec_send_packet(decoder_audio_avcc, input_packet);
     while (response >= 0) {
@@ -449,7 +458,8 @@ bool transcode_track(const char *track_path) {
         return false;
       }
 
-      encode(encoder_avfc, de
+      av_audio_fifo_write(audio_fifo, /* data */ input_frame->data[0],
+                          /*nb_samples*/ input_frame->nb_samples);
     }
   }
 
