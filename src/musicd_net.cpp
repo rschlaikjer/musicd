@@ -63,6 +63,8 @@ int set_socket_nonblocking(int fd) {
 
 int set_socket_keepalive(int fd, int interval, int tolerance) {
   int ok = 0;
+  int yes = 1;
+  ok = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&yes, sizeof(yes));
   ok = setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, (void *)&interval,
                   sizeof(interval));
   ok = setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, (void *)&interval,
@@ -534,8 +536,10 @@ int NetServer::loop() {
 
         // Setup the socket as desired.
         set_socket_nonblocking(conn_fd);
-        set_socket_keepalive(conn_fd, /* interval secodns */ 10,
-                             /* tolerance */ 2);
+        if (set_socket_keepalive(conn_fd, /* interval secodns */ 10,
+                                 /* tolerance */ 2) != 0) {
+          LOG_E("Failed to set keepalive on socket %d\n", conn_fd);
+        }
 
         add_pollfd(conn_fd);
       } else {
@@ -543,7 +547,7 @@ int NetServer::loop() {
         // Problems with the socket?
         if (_pollfds[i].revents & (POLLERR | POLLHUP)) {
           // Socket problem, disconnect them
-          LOG_I("Poll error for fd %d\n", _pollfds[i].fd);
+          LOG_I("Poll error / dicsonnect for fd %d\n", _pollfds[i].fd);
           close(_pollfds[i].fd);
           remove_pollfd(i);
           continue;
