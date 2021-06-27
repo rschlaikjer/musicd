@@ -115,6 +115,16 @@ void NetServer::transcode_worker_loop() {
     // Generate the cache file path
     const std::string transcode_path = cache_path(job.hash);
 
+    // Ensure the enclosing dir exist
+    const std::filesystem::path transcode_parent_path =
+        std::filesystem::path(transcode_path).parent_path();
+    if (!std::filesystem::exists(transcode_parent_path)) {
+      if (!std::filesystem::create_directories(transcode_parent_path)) {
+        LOG_E("Failed to create transcode parent path %s\n",
+              transcode_parent_path.c_str());
+      }
+    }
+
     // Go transcode the file
     const int64_t transcode_start = time_ms();
     const bool transcode_ok =
@@ -290,7 +300,9 @@ int NetServer::handle_packet_fetch_db(int fd, uint32_t nonce) {
 
 std::string NetServer::cache_path(const std::string &hash) {
   std::filesystem::path path(_settings.cache_dir);
-  path.append(bytes_to_hex(hash));
+  const std::string hash_hex = bytes_to_hex(hash);
+  path.append(hash_hex.substr(0, 2));
+  path.append(hash_hex.substr(2));
   return path;
 }
 
