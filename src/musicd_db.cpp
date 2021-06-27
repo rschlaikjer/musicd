@@ -179,7 +179,7 @@ void ingest_music_file(pqxx::work &pq_transaction, const std::string &base_path,
     return;
   }
 
-  music_file->print();
+  // music_file->print();
 
   // Save to the db
   pq_transaction

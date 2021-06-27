@@ -116,10 +116,13 @@ void NetServer::transcode_worker_loop() {
     const std::string transcode_path = cache_path(job.hash);
 
     // Go transcode the file
+    const int64_t transcode_start = time_ms();
     const bool transcode_ok =
         transcode_track(job.input_path.c_str(), transcode_path.c_str());
+    const int64_t transcode_end = time_ms();
     job.success = transcode_ok;
-    LOG_I("Transcode %s for source track %s\n", transcode_ok ? "OK" : "FAILURE",
+    LOG_I("Transcode %s in %ldms for source track %s\n",
+          transcode_ok ? "OK" : "FAILURE", transcode_end - transcode_start,
           job.input_path.c_str());
 
     // Put the job on the output queue
