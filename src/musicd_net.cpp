@@ -438,11 +438,18 @@ int NetServer::loop() {
         TranscodeJob job = _transcode_response_queue.front();
         _transcode_response_queue.pop_front();
 
-        // Look up the fd, and if it's still valid, send the response data
-        std::unique_ptr<std::string> cached_data =
-            read_file(cache_path(job.hash));
-        send_packet_response(job.fd, job.nonce, PacketOpcode::FETCH_TRACK,
-                             *cached_data);
+        if (job.success) {
+          // Look up the fd, and if it's still valid, send the response data
+          std::unique_ptr<std::string> cached_data =
+              read_file(cache_path(job.hash));
+          send_packet_response(job.fd, job.nonce, PacketOpcode::FETCH_TRACK,
+                               *cached_data);
+        } else {
+          // Send the un-transcoded source file as a fallback
+          std::unique_ptr<std::string> track_data = read_file(job.input_path);
+          send_packet_response(job.fd, job.nonce, PacketOpcode::FETCH_TRACK,
+                               *track_data);
+        }
       }
     }
 
