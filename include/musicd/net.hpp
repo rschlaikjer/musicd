@@ -93,8 +93,9 @@ private:
   std::vector<struct pollfd> _pollfds;
   std::vector<std::string> _slabs;
 
-  // Prepare PG connection
+  // PSQL connections
   pqxx::connection _pq_conn;
+  pqxx::connection _db_update_pq_conn;
 
   // Database updates are very slow, run in a separate thread
   std::atomic<bool> _db_thread_update_request{false};

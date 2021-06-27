@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <memory>
 
 #include <openssl/sha.h>
@@ -131,6 +132,12 @@ std::unique_ptr<std::string> read_file(std::string path) {
   }
 
   return ret;
+}
+
+int64_t time_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
 }
 
 } // namespace musicd

@@ -258,6 +258,9 @@ void ingest_file(pqxx::work &pq_transaction,
 }
 
 void update_db(pqxx::connection &pq_conn, const char *path) {
+  // Get the current time
+  const int64_t db_update_start = time_ms();
+
   // Create a new transaction
   pqxx::work pq_transaction(pq_conn);
 
@@ -313,6 +316,11 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
 
   // Commit our DB update
   pq_transaction.commit();
+
+  // Log total update time
+  const int64_t db_update_finish = time_ms();
+  LOG_I("Database update finished, elapsed time %ldms\n",
+        db_update_finish - db_update_start);
 }
 
 std::unique_ptr<msgs::MusicDatabase>

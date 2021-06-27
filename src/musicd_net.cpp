@@ -136,14 +136,15 @@ NetServer::NetServer(Settings settings)
           TRANSCODE_THREADPOOL_SIZE,
           std::bind(&NetServer::transcode_worker_loop, this)) {
 
-  // Prepare PQ connection
+  // Prepare PQ connections
   pq_prepare(_pq_conn);
+  pq_prepare(_db_update_pq_conn);
 
   // Spawn db update thread
   _db_update_thread = std::thread([&]() {
     while (true) {
       if (_db_thread_update_request.exchange(false)) {
-        update_db(_pq_conn, _settings.music_dir.c_str());
+        update_db(_db_update_pq_conn, _settings.music_dir.c_str());
       }
       usleep(1'000'000);
     }
@@ -407,8 +408,8 @@ int NetServer::process_incoming_data(int fd, std::string &slab) {
 
   // If the data is not yet all here, return
   if (slab.size() < data_len + HEADER_SIZE) {
-    LOG_I("Slab size %lu < header size (%u) + data len (%u)\n", slab.size(),
-          HEADER_SIZE, data_len);
+    // LOG_I("Slab size %lu < header size (%u) + data len (%u)\n", slab.size(),
+    //       HEADER_SIZE, data_len);
     return 0;
   }
 

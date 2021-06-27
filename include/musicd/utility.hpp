@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #include <string>
 #include <vector>
 
@@ -14,6 +16,8 @@ std::string tolower(const std::string &in);
 std::string filetype_extension(const std::string &path);
 
 std::unique_ptr<std::string> read_file(std::string path);
+
+int64_t time_ms();
 
 template <typename T>
 bool vector_contains(const std::vector<T> &haystack, const T &needle) {
