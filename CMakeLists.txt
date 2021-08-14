@@ -81,3 +81,15 @@ target_link_libraries(musicd
   ${LIBAV_UTIL_LIBRARIES}
   ${LIBSWRESAMPLE_LIBRARIES}
 )
+
+add_executable(test_transcode
+  test/transcode.cpp
+  src/musicd_transcode.cpp
+)
+target_link_libraries(test_transcode
+  stdc++fs
+  ${LIBAV_FORMAT_LIBRARIES}
+  ${LIBAV_CODEC_LIBRARIES}
+  ${LIBAV_UTIL_LIBRARIES}
+  ${LIBSWRESAMPLE_LIBRARIES}
+)
