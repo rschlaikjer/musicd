@@ -281,7 +281,9 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
 
       // If the file is gone, delete this DB entry
       LOG_I("Path %s disappeared, removing from DB\n", path.c_str());
-      pq_transaction.prepared(DELETE_TRACK_BY_CHECKSUM)(checksum).exec();
+      pq_transaction
+          .prepared(DELETE_TRACK_BY_CHECKSUM)(pqxx::binarystring(checksum))
+          .exec();
     }
 
     // Images
@@ -298,7 +300,9 @@ void update_db(pqxx::connection &pq_conn, const char *path) {
 
       // If the file is gone, delete this DB entry
       LOG_I("Path %s disappeared, removing from DB\n", path.c_str());
-      pq_transaction.prepared(DELETE_IMAGE_BY_CHECKSUM)(checksum).exec();
+      pq_transaction
+          .prepared(DELETE_IMAGE_BY_CHECKSUM)(pqxx::binarystring(checksum))
+          .exec();
     }
   }
 
