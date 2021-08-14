@@ -178,6 +178,21 @@ bool NetServer::init() {
     }
   }
 
+  // Check the cache for zero-size files that sometimes get left behind by
+  // crashes in ffmpeg
+  for (const auto &dirent :
+       std::filesystem::recursive_directory_iterator(_settings.cache_dir)) {
+    if (dirent.is_regular_file() && dirent.file_size() == 0) {
+      LOG_W("Found zero-length cache file '%s', removing\n",
+            dirent.path().c_str());
+      std::error_code err;
+      if (!std::filesystem::remove(dirent.path(), err)) {
+        LOG_E("Failed to delete '%s' - %s\n", dirent.path().c_str(),
+              err.message().c_str());
+      }
+    }
+  }
+
   // Try and resolve the bind address / port
   struct addrinfo hints = {};
   hints.ai_family = AF_UNSPEC;
