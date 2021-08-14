@@ -61,6 +61,7 @@ add_executable(musicd
   src/musicd_db.cpp
   src/musicd_net.cpp
   src/musicd_utility.cpp
+  src/musicd_log.cpp
   ${PROTO_SRCS}
   ${PROTO_HDRS}
 )
@@ -85,6 +86,7 @@ target_link_libraries(musicd
 add_executable(test_transcode
   test/transcode.cpp
   src/musicd_transcode.cpp
+  src/musicd_log.cpp
 )
 target_link_libraries(test_transcode
   stdc++fs

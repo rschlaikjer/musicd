@@ -16,10 +16,10 @@ extern "C" {
 namespace musicd {
 
 void print_transcode_versions() {
-  fprintf(stderr, "avformat: version %u\n", avformat_version());
-  fprintf(stderr, "avcodec version %u\n", avcodec_version());
-  fprintf(stderr, "avutil version %u\n", avutil_version());
-  fprintf(stderr, "swresample version %u\n", swresample_version());
+  LOG_I("avformat: version %u\n", avformat_version());
+  LOG_I("avcodec version %u\n", avcodec_version());
+  LOG_I("avutil version %u\n", avutil_version());
+  LOG_I("swresample version %u\n", swresample_version());
 }
 
 void print_av_err(const char *msg, int err) {
@@ -112,7 +112,7 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
   }
 
   // Create an audio FIFO to hold the decoded stream
-  AVSampleFormat raw_sample_fmt = AV_SAMPLE_FMT_FLTP;
+  const AVSampleFormat raw_sample_fmt = AV_SAMPLE_FMT_FLTP;
   const int channels =
       decoder_avfc->streams[source_stream_index]->codecpar->channels;
   AVAudioFifo *audio_fifo = av_audio_fifo_alloc(raw_sample_fmt, channels, 1);
@@ -126,11 +126,17 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
       decoder_avfc->streams[source_stream_index]->codecpar;
   const AVSampleFormat input_sample_format = static_cast<AVSampleFormat>(
       decoder_avfc->streams[source_stream_index]->codecpar->format);
-  const bool must_resample = input_sample_format != AV_SAMPLE_FMT_FLTP;
+  const bool must_resample = input_sample_format != raw_sample_fmt;
+  if (must_resample) {
+    LOG_I("Resampling input %s from %s to %s\n", input_path,
+          av_get_sample_fmt_name(input_sample_format),
+          av_get_sample_fmt_name(raw_sample_fmt));
+  }
 
   // Initialize the SWR context if needed
   SwrContext *swr = nullptr;
   std::shared_ptr<void> _defer_free_swr;
+  static const int RESAMPLE_BUFFER_SIZE_SAMPLES = 8192;
   float *resampled[8] = {nullptr};
   if (must_resample) {
     swr = swr_alloc();
@@ -140,12 +146,13 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
     av_opt_set_int(swr, "in_sample_rate", input_codecpar->sample_rate, 0);
     av_opt_set_int(swr, "out_sample_rate", 44100, 0);
     av_opt_set_sample_fmt(swr, "in_sample_fmt", input_sample_format, 0);
-    av_opt_set_sample_fmt(swr, "out_sample_fmt", AV_SAMPLE_FMT_FLTP, 0);
+    av_opt_set_sample_fmt(swr, "out_sample_fmt", raw_sample_fmt, 0);
     swr_init(swr);
 
     // Allocate intermediate buffer for resampled data
     const int buffer_size = av_samples_get_buffer_size(
-        nullptr, input_codecpar->channels, 8192, AV_SAMPLE_FMT_FLTP, 1);
+        nullptr, input_codecpar->channels, RESAMPLE_BUFFER_SIZE_SAMPLES,
+        raw_sample_fmt, 1);
     for (int i = 0; i < input_codecpar->channels; i++) {
       resampled[i] = static_cast<float *>(malloc(buffer_size));
     }
@@ -197,9 +204,12 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
 
       // If the input codec is not already using FLTP samples, we need to
       // resample it
-      if (static_cast<AVSampleFormat>(
-              decoder_avfc->streams[source_stream_index]->codecpar->format) !=
-          AV_SAMPLE_FMT_FLTP) {
+      if (must_resample) {
+        if (input_frame->nb_samples > RESAMPLE_BUFFER_SIZE_SAMPLES) {
+          LOG_E("Attempted to resample %d samples into buffer sized for %d "
+                "samples!\n",
+                input_frame->nb_samples, RESAMPLE_BUFFER_SIZE_SAMPLES);
+        }
         swr_convert(swr, (uint8_t **)resampled, input_frame->nb_samples,
                     (const uint8_t **)input_frame->data,
                     input_frame->nb_samples);
@@ -315,7 +325,8 @@ bool av_encode_from_fifo(AVAudioFifo *audio_fifo, const char *output_path) {
       nullptr, [&](...) { av_frame_free(&input_frame); });
 
   // Initialize input frame
-  input_frame->nb_samples = 1024;
+  static const int INPUT_SAMPLES = 1024;
+  input_frame->nb_samples = INPUT_SAMPLES;
   input_frame->channel_layout = avcc->channel_layout;
   input_frame->format = avcc->sample_fmt;
   input_frame->sample_rate = avcc->sample_rate;
@@ -328,7 +339,7 @@ bool av_encode_from_fifo(AVAudioFifo *audio_fifo, const char *output_path) {
   int pts = 0;
   while (av_audio_fifo_size(audio_fifo)) {
     // Try and read some data from the FIFO
-    const int samples_to_read = 1024;
+    const int samples_to_read = INPUT_SAMPLES;
     int err = av_audio_fifo_read(audio_fifo, (void **)input_frame->data,
                                  samples_to_read);
     if (err < 0) {
