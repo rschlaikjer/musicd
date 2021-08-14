@@ -285,7 +285,7 @@ int NetServer::send_packet_response(int fd, uint32_t nonce, PacketOpcode opcode,
       } else {
         LOG_E("Failed to send data on fd %d: %d: %s\n", fd, errno,
               strerror(errno));
-        return EXIT_FAILURE;
+        return -1;
       }
     }
   } while (total_sent < data.size());
