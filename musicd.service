@@ -1,0 +1,19 @@
+[Unit]
+Description=Music Daemom
+After=syslog.target network.target
+
+[Service]
+User=ross
+Group=ross
+Type=simple
+# PSQL
+Environment=PGUSER=music
+Environment=PGPASSWORD=
+Environment=PGDATABASE=musicd
+Environment=PGHOST=
+WorkingDirectory=/path/to/music/
+ExecStart=/opt/musicd/musicd /path/to/music /path/to/cache/dir
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
