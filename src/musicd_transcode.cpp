@@ -121,16 +121,19 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
     return false;
   }
 
-  // If our decoder doesn't output FLTP samples, we need to create a resampler
+  // If our decoder doesn't output FLTP samples, or the sample rate is
+  // different, we need a resample pass
   const AVCodecParameters *input_codecpar =
       decoder_avfc->streams[source_stream_index]->codecpar;
   const AVSampleFormat input_sample_format = static_cast<AVSampleFormat>(
       decoder_avfc->streams[source_stream_index]->codecpar->format);
-  const bool must_resample = input_sample_format != raw_sample_fmt;
+  const bool must_resample = (input_sample_format != raw_sample_fmt) ||
+                             (input_codecpar->sample_rate != 44100);
   if (must_resample) {
-    LOG_I("Resampling input %s from %s to %s\n", input_path,
+    LOG_I("Resampling input %s from %s to %s (%dHz -> %dHz)\n", input_path,
           av_get_sample_fmt_name(input_sample_format),
-          av_get_sample_fmt_name(raw_sample_fmt));
+          av_get_sample_fmt_name(raw_sample_fmt), input_codecpar->sample_rate,
+          44100);
   }
 
   // Initialize the SWR context if needed
@@ -141,8 +144,7 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
   if (must_resample) {
     swr = swr_alloc();
     av_opt_set_int(swr, "in_channel_layout", input_codecpar->channel_layout, 0);
-    av_opt_set_int(swr, "out_channel_layout", input_codecpar->channel_layout,
-                   0);
+    av_opt_set_int(swr, "out_channel_layout", AV_CH_LAYOUT_STEREO, 0);
     av_opt_set_int(swr, "in_sample_rate", input_codecpar->sample_rate, 0);
     av_opt_set_int(swr, "out_sample_rate", 44100, 0);
     av_opt_set_sample_fmt(swr, "in_sample_fmt", input_sample_format, 0);
@@ -210,12 +212,16 @@ bool av_decode_to_fifo(const char *input_path, AVAudioFifo **fifo) {
                 "samples!\n",
                 input_frame->nb_samples, RESAMPLE_BUFFER_SIZE_SAMPLES);
         }
-        swr_convert(swr, (uint8_t **)resampled, input_frame->nb_samples,
-                    (const uint8_t **)input_frame->data,
-                    input_frame->nb_samples);
+        int out_samples =
+            av_rescale_rnd(swr_get_delay(swr, input_codecpar->sample_rate) +
+                               input_frame->nb_samples,
+                           44100, input_codecpar->sample_rate, AV_ROUND_UP);
+        out_samples = swr_convert(swr, (uint8_t **)resampled, out_samples,
+                                  (const uint8_t **)input_frame->extended_data,
+                                  input_frame->nb_samples);
 
         av_audio_fifo_write(audio_fifo, /* data */ (void **)resampled,
-                            /*nb_samples*/ input_frame->nb_samples);
+                            /*nb_samples*/ out_samples);
       } else {
         av_audio_fifo_write(audio_fifo, /* data */ (void **)input_frame->data,
                             /*nb_samples*/ input_frame->nb_samples);
