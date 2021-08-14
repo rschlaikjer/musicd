@@ -111,8 +111,8 @@ void NetServer::transcode_worker_loop() {
     }
 
     // If we got a job to process, go transcode it
-    LOG_I("Worker received transcode job for content hash %s\n",
-          bytes_to_hex(job.hash).c_str());
+    LOG_I("Worker received transcode job for content hash %s (%s)\n",
+          bytes_to_hex(job.hash).c_str(), job.input_path.c_str());
 
     // Generate the cache file path
     const std::string transcode_path = cache_path(job.hash);
