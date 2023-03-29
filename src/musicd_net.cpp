@@ -64,13 +64,13 @@ int set_socket_nonblocking(int fd) {
 int set_socket_keepalive(int fd, int interval, int tolerance) {
   int ok = 0;
   int yes = 1;
-  ok = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&yes, sizeof(yes));
-  ok = setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, (void *)&interval,
-                  sizeof(interval));
-  ok = setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, (void *)&interval,
-                  sizeof(interval));
-  ok = setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&tolerance,
-                  sizeof(tolerance));
+  ok |= setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&yes, sizeof(yes));
+  ok |= setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, (void *)&interval,
+                   sizeof(interval));
+  ok |= setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, (void *)&interval,
+                   sizeof(interval));
+  ok |= setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&tolerance,
+                   sizeof(tolerance));
   return ok;
 }
 
